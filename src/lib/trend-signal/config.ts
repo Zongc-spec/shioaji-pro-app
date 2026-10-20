@@ -1,11 +1,11 @@
 // src/lib/trend-signal/config.ts — Trend Signal Pro 參數：指標設定視窗的
-// 數值參數（ParamDef）⇄ 引擎設定，以及計算版本與設定指紋（訊號 ID 用）。
+// 數值參數（ParamDef）⇄ 分模組的引擎設定，以及計算版本與各模組的參數指紋。
 
 import type { ParamDef } from '../indicator-defs';
-import type { TrendSignalConfig } from './types';
+import type { EntryMode, EntryParams, NoteParams, RiskConfig, TrendAlgoId, TrendParams, TrendSignalConfig } from './types';
 
 export const TSP_TYPE = 'trend-signal-pro';
-/** 計算規則版本：改動任何訊號／風控規則都要升版，舊訊號 ID 才不會混淆 */
+/** 計算規則版本：改動任何訊號／進場／風控規則都要升版，舊 ID 才不會混淆 */
 export const TSP_ALGO_VERSION = 'tsp-1.0.0';
 
 /** V1 交易權限：只觀察。啟用任何發單能力需另行授權（規格 §0.5） */
@@ -15,20 +15,26 @@ export const TSP_PERMISSIONS = {
     auto_exit: false,
 } as const;
 
-// 設定視窗依此順序顯示；前綴說明參數屬於哪個週期
+export const TREND_ALGOS: TrendAlgoId[] = ['supertrend', 'donchian', 'kama'];
+export const ENTRY_MODES: EntryMode[] = ['IMMEDIATE', 'MICRO_TREND', 'PRICE_STRUCTURE', 'PULLBACK_KD'];
+
+// 設定視窗依此順序顯示；前綴說明參數屬於哪個模組
 export const TSP_PARAMS: ParamDef[] = [
-    { key: 'stPeriod', label: '5m｜SuperTrend ATR 週期', def: 10, min: 1, max: 100 },
-    { key: 'stMult', label: '5m｜SuperTrend 倍數', def: 3, min: 0.5, max: 10, step: 0.5 },
-    { key: 'emaPeriod', label: '5m｜EMA 週期', def: 21, min: 2, max: 200 },
-    { key: 'atrPeriod', label: '5m｜ATR 週期（移動停損）', def: 14, min: 1, max: 100 },
-    { key: 'candidateBars', label: '5m｜候選有效 K 棒數', def: 3, min: 1, max: 20 },
-    { key: 'ema1m', label: '1m｜EMA 週期', def: 9, min: 2, max: 100 },
-    { key: 'kdPeriod', label: '1m｜KD RSV 週期', def: 9, min: 1, max: 100 },
-    { key: 'kdK', label: '1m｜KD K 平滑', def: 3, min: 1, max: 50 },
-    { key: 'kdD', label: '1m｜KD D 平滑', def: 3, min: 1, max: 50 },
-    { key: 'touchTol', label: '1m｜回測容差（× ATR14）', def: 0.25, min: 0, max: 2, step: 0.05 },
-    { key: 'kdChase', label: '1m｜KD 追價上限（100 = 關）', def: 80, min: 50, max: 100 },
-    { key: 'volFilter', label: '1m｜成交量濾網（0 關 / 1 開）', def: 0, min: 0, max: 1 },
+    { key: 'algo', label: '趨勢｜演算法（0 SuperTrend／1 Donchian／2 KAMA）', def: 0, min: 0, max: 2 },
+    { key: 'stPeriod', label: '趨勢｜SuperTrend ATR 週期', def: 10, min: 1, max: 100 },
+    { key: 'stMult', label: '趨勢｜SuperTrend 倍數（靈敏度，小＝快）', def: 3, min: 0.5, max: 10, step: 0.5 },
+    { key: 'dcLength', label: '趨勢｜Donchian 週期', def: 20, min: 2, max: 200 },
+    { key: 'kamaLength', label: '趨勢｜KAMA 效率比週期', def: 10, min: 2, max: 100 },
+    { key: 'kamaFast', label: '趨勢｜KAMA 快速常數', def: 2, min: 1, max: 50 },
+    { key: 'kamaSlow', label: '趨勢｜KAMA 慢速常數', def: 30, min: 2, max: 200 },
+    { key: 'kamaHyst', label: '趨勢｜KAMA 翻轉遲滯（× ATR14）', def: 0.3, min: 0, max: 3, step: 0.05 },
+    { key: 'emaPeriod', label: '註記｜EMA 週期（只標示，不影響訊號）', def: 21, min: 2, max: 200 },
+    { key: 'entryMode', label: '進場｜風控採用（0 IMMEDIATE／1 MICRO_TREND／2 PRICE_STRUCTURE／3 舊假說 EMA9·VWAP·KD）', def: 0, min: 0, max: 3 },
+    { key: 'windowBars', label: '進場｜窗口（5m 根數，不跨盤）', def: 3, min: 1, max: 20 },
+    { key: 'microMult', label: '進場｜1m 微型趨勢 SuperTrend 倍數（小＝快）', def: 1, min: 0.25, max: 10, step: 0.25 },
+    { key: 'pivotLeft', label: '進場｜結構轉折左側 K 棒', def: 2, min: 1, max: 10 },
+    { key: 'pivotRight', label: '進場｜結構轉折右側確認 K 棒', def: 2, min: 1, max: 10 },
+    { key: 'minPullbackAtr', label: '進場｜最小回檔（× 1m ATR14）', def: 0.5, min: 0, max: 5, step: 0.05 },
     { key: 'budget', label: '風控｜每筆風險預算 NT$', def: 1000, min: 100, max: 1000000, step: 100 },
     { key: 'feePerSide', label: '風控｜單邊手續費 NT$/口', def: 12, min: 0, max: 1000 },
     { key: 'slipTicks', label: '風控｜滑價緩衝（tick/邊）', def: 1, min: 0, max: 20 },
@@ -36,15 +42,16 @@ export const TSP_PARAMS: ParamDef[] = [
     { key: 'swingBars', label: '風控｜擺動高低點 K 棒數（1m）', def: 5, min: 3, max: 30 },
     { key: 'stopAtr', label: '風控｜初始停損 ATR 倍數（1m）', def: 1.5, min: 0.5, max: 5, step: 0.1 },
     { key: 'trailAtr', label: '風控｜移動停損 ATR 倍數（5m）', def: 1.2, min: 0.5, max: 5, step: 0.1 },
-    { key: 'singleExit', label: '風控｜單口出場（1 追蹤 / 2 2R / 3 3R）', def: 1, min: 1, max: 3 },
-    { key: 'tierMode', label: '風控｜多口分配（0 規格表 / 1 自訂）', def: 0, min: 0, max: 1 },
+    { key: 'singleExit', label: '風控｜單口出場（1 追蹤／2 2R／3 3R）', def: 1, min: 1, max: 3 },
+    { key: 'tierMode', label: '風控｜多口分配（0 規格表／1 自訂）', def: 0, min: 0, max: 1 },
     { key: 'tp2Lots', label: '風控｜自訂 2R 停利口數', def: 1, min: 0, max: 50 },
     { key: 'tp3Lots', label: '風控｜自訂 3R 停利口數', def: 1, min: 0, max: 50 },
 ];
 
-const DEFAULTS: Record<string, number> = Object.fromEntries(
-    TSP_PARAMS.map((p) => [p.key, p.def]),
-);
+/** legend 只顯示趨勢核心參數 */
+export const TSP_LABEL_PARAMS = ['stPeriod', 'stMult'];
+
+const DEFAULTS: Record<string, number> = Object.fromEntries(TSP_PARAMS.map((p) => [p.key, p.def]));
 
 // 參數值超出範圍時夾回範圍內（設定視窗與 Agent 服務都已驗證，這裡是最後防線）
 function param(p: Record<string, number>, key: string): number {
@@ -53,43 +60,48 @@ function param(p: Record<string, number>, key: string): number {
     if (typeof v !== 'number' || !Number.isFinite(v)) return def.def;
     return Math.min(def.max, Math.max(def.min, v));
 }
+const int = (p: Record<string, number>, key: string) => Math.round(param(p, key));
 
 export function configFromParams(p: Record<string, number> = {}): TrendSignalConfig {
-    const singleExit = Math.round(param(p, 'singleExit'));
-    return {
-        stPeriod: Math.round(param(p, 'stPeriod')),
+    const trend: TrendParams = {
+        algo: TREND_ALGOS[int(p, 'algo')] ?? 'supertrend',
+        stPeriod: int(p, 'stPeriod'),
         stMult: param(p, 'stMult'),
-        emaPeriod: Math.round(param(p, 'emaPeriod')),
-        emaSlopeBars: 2,
-        atrPeriod: Math.round(param(p, 'atrPeriod')),
-        candidateBars: Math.round(param(p, 'candidateBars')),
-        ema1m: Math.round(param(p, 'ema1m')),
-        atr1m: 14,
-        kdPeriod: Math.round(param(p, 'kdPeriod')),
-        kdK: Math.round(param(p, 'kdK')),
-        kdD: Math.round(param(p, 'kdD')),
-        touchTol: param(p, 'touchTol'),
-        kdChase: param(p, 'kdChase'),
-        volumeFilter: param(p, 'volFilter') >= 1,
-        volumeLookback: 20,
-        keyBars: 20,
+        dcLength: int(p, 'dcLength'),
+        kamaLength: int(p, 'kamaLength'),
+        kamaFast: int(p, 'kamaFast'),
+        kamaSlow: int(p, 'kamaSlow'),
+        kamaHyst: param(p, 'kamaHyst'),
+    };
+    const note: NoteParams = { emaPeriod: int(p, 'emaPeriod'), emaSlopeBars: 2, atrPeriod: 14, rsiPeriod: 14, keyBars: 20 };
+    const entry: EntryParams = {
+        mode: ENTRY_MODES[int(p, 'entryMode')] ?? 'IMMEDIATE',
+        windowBars: int(p, 'windowBars'),
+        microMult: param(p, 'microMult'),
+        pivotLeft: int(p, 'pivotLeft'),
+        pivotRight: int(p, 'pivotRight'),
+        minPullbackAtr: param(p, 'minPullbackAtr'),
+    };
+    const singleExit = int(p, 'singleExit');
+    const risk: RiskConfig = {
         budget: param(p, 'budget'),
         feePerSide: param(p, 'feePerSide'),
-        slipTicks: Math.round(param(p, 'slipTicks')),
-        qty: Math.round(param(p, 'qty')),
-        swingBars: Math.round(param(p, 'swingBars')),
+        slipTicks: int(p, 'slipTicks'),
+        qty: int(p, 'qty'),
+        swingBars: int(p, 'swingBars'),
         stopAtr: param(p, 'stopAtr'),
         trailAtr: param(p, 'trailAtr'),
         singleExit: singleExit === 2 ? 2 : singleExit === 3 ? 3 : 1,
-        tierMode: param(p, 'tierMode') >= 1 ? 'custom' : 'auto',
-        tp2Lots: Math.round(param(p, 'tp2Lots')),
-        tp3Lots: Math.round(param(p, 'tp3Lots')),
+        tierMode: int(p, 'tierMode') >= 1 ? 'custom' : 'auto',
+        tp2Lots: int(p, 'tp2Lots'),
+        tp3Lots: int(p, 'tp3Lots'),
     };
+    return { trend, note, entry, risk };
 }
 
 export const DEFAULT_CONFIG: TrendSignalConfig = configFromParams(DEFAULTS);
 
-// FNV-1a 32-bit — 設定指紋只求穩定、短，不做安全用途
+// FNV-1a 32-bit — 參數指紋只求穩定、短，不做安全用途
 function fnv1a(s: string): string {
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) {
@@ -99,8 +111,17 @@ function fnv1a(s: string): string {
     return (h >>> 0).toString(16).padStart(8, '0');
 }
 
-/** 計算版本 + 設定指紋：同設定同版本 → 同 ID，換參數就是另一組訊號 */
-export function configKey(cfg: TrendSignalConfig): string {
-    const keys = Object.keys(cfg).sort() as (keyof TrendSignalConfig)[];
-    return `${TSP_ALGO_VERSION}#${fnv1a(JSON.stringify(keys.map((k) => [k, cfg[k]])))}`;
+function fingerprint(obj: object): string {
+    const entries = Object.entries(obj).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return fnv1a(JSON.stringify(entries));
 }
+
+/** 訊號只由趨勢參數決定：ID 只帶趨勢參數的指紋，改進場或風控參數不改訊號 ID */
+export const trendKey = (cfg: TrendSignalConfig) => `${TSP_ALGO_VERSION}#${fingerprint(cfg.trend)}`;
+/** 每種進場模式都會計算；「風控採用哪一個」不影響事件本身，不進指紋 */
+export const entryKey = (cfg: TrendSignalConfig) => {
+    const { mode: _mode, ...rest } = cfg.entry;
+    return fingerprint(rest);
+};
+export const riskKey = (cfg: TrendSignalConfig) => fingerprint(cfg.risk);
+export const configKey = (cfg: TrendSignalConfig) => `${trendKey(cfg)}.${fingerprint(cfg.note)}.${entryKey(cfg)}.${riskKey(cfg)}`;

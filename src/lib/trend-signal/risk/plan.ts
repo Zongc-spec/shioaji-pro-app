@@ -1,9 +1,9 @@
-// src/lib/trend-signal/risk.ts — 純風控計畫（P3，只產生虛擬計畫，不送單）：
+// src/lib/trend-signal/risk/plan.ts — 純風控計畫（P3，只產生虛擬計畫，不送單）：
 // 初始停損、固定 R 與 1R/2R/3R、新臺幣風險預算與口數、整數口數分層、
 // 保本價與只往有利方向移動的移動停損。價格一律以 tick 正規化。
 
-import type { Candle } from '../types/market';
-import type { Direction, RiskPlan, TierPlan, TrendSignalConfig } from './types';
+import type { Candle } from '../../types/market';
+import type { Direction, RiskConfig, RiskPlan, TierPlan } from '../types';
 
 function decimalsOf(tick: number): number {
     const s = String(tick);
@@ -46,12 +46,12 @@ export function swingPoint(bars: Candle[], m: number, n: number, dir: Direction)
 }
 
 /** 單口來回成本（新臺幣）：手續費兩邊 + 滑價緩衝兩邊 */
-export function roundTripCost(cfg: Pick<TrendSignalConfig, 'feePerSide' | 'slipTicks'>, tick: number, pointValue: number): number {
+export function roundTripCost(cfg: Pick<RiskConfig, 'feePerSide' | 'slipTicks'>, tick: number, pointValue: number): number {
     return 2 * cfg.feePerSide + 2 * cfg.slipTicks * tick * pointValue;
 }
 
 /** 依口數分配 2R／3R／追蹤三層（整數、加總等於口數、不產生零口以外的負數） */
-export function allocateTiers(qty: number, cfg: Pick<TrendSignalConfig, 'singleExit' | 'tierMode' | 'tp2Lots' | 'tp3Lots'>): TierPlan {
+export function allocateTiers(qty: number, cfg: Pick<RiskConfig, 'singleExit' | 'tierMode' | 'tp2Lots' | 'tp3Lots'>): TierPlan {
     if (qty <= 0) return { r2: 0, r3: 0, trail: 0 };
     if (qty === 1) {
         if (cfg.singleExit === 2) return { r2: 1, r3: 0, trail: 0 };
@@ -79,7 +79,7 @@ export interface PlanInput {
     atr: number | undefined;
     tick: number;
     pointValue: number | null;
-    cfg: TrendSignalConfig;
+    cfg: RiskConfig;
     /** 已成交口數：成交後以成交價重新定價時固定口數，超出預算只標示 overBudget */
     fixedQty?: number;
 }

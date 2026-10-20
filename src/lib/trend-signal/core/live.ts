@@ -1,8 +1,8 @@
-// src/lib/trend-signal/live.ts — 逐筆成交 → 即時 1m K 棒（canonical 1m 的
+// src/lib/trend-signal/core/live.ts — 逐筆成交 → 即時 1m K 棒（canonical 1m 的
 // 即時尾段）。歷史 1m 不可變；tick 只改寫歷史最後一根之後（或同一根）的
 // 尾段，已經被更晚成交超越的分鐘不再改寫（已收 K 棒不重繪）。
 
-import type { Candle } from '../types/market';
+import type { Candle } from '../../types/market';
 
 /** 成交時間 τ（牆鐘秒）→ 所屬 1m 的收盤 label（與主圖即時桶同一公式） */
 export const minuteLabel = (tau: number) => Math.floor(tau / 60) * 60 + 60;

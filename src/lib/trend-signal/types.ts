@@ -1,40 +1,55 @@
-// src/lib/trend-signal/types.ts — Trend Signal Pro（5m 主控、1m 執行、
-// 15m/60m 輔助）的共用型別。時間一律是台灣牆鐘編碼成 UTC 秒
-// （utils/kbars.wallClockToUtc），K 棒時間是收盤 label。
+// src/lib/trend-signal/types.ts — Trend Signal Pro 的共用型別。
+// 模組分工（單向依賴）：core（已收棒資料）→ trend（趨勢訊號，純指標）
+// → trigger（1m 進場時機）→ risk（虛擬風控）。時間一律是台灣牆鐘編碼成
+// UTC 秒（utils/kbars.wallClockToUtc），K 棒時間是收盤 label。
 
-import type { Candle } from '../types/market';
 import type { SecurityType } from '../types/contract';
+import type { Candle } from '../types/market';
 
-export type TrendState = 'UNKNOWN' | 'LONG' | 'SHORT' | 'NEUTRAL';
+export type TrendDir = 'UP' | 'DOWN' | 'UNKNOWN';
 export type Direction = 'LONG' | 'SHORT';
 export type Alignment = 'ALIGN' | 'DIVERGE' | 'NEUTRAL';
 export type TfMinutes = 1 | 5 | 15 | 60;
+export type TrendAlgoId = 'supertrend' | 'donchian' | 'kama';
+export type EntryMode = 'IMMEDIATE' | 'MICRO_TREND' | 'PRICE_STRUCTURE' | 'PULLBACK_KD';
 
-export interface TrendSignalConfig {
-    // ---- 5m 主控 ----
+// ---- 設定（依模組分組；每個模組只拿得到自己那一份） ----
+
+export interface TrendParams {
+    algo: TrendAlgoId;
     stPeriod: number;
     stMult: number;
+    dcLength: number;
+    kamaLength: number;
+    kamaFast: number;
+    kamaSlow: number;
+    /** KAMA 線自身回落／回升 kamaHyst × ATR14 才翻轉 */
+    kamaHyst: number;
+}
+
+/** 只顯示、不參與訊號的註記與強度 */
+export interface NoteParams {
     emaPeriod: number;
-    /** EMA 斜率：與幾根前比較（規格：兩根前） */
     emaSlopeBars: number;
     atrPeriod: number;
-    /** BUY/SELL 後允許 1m 進場的 5m K 棒數 */
-    candidateBars: number;
-    // ---- 1m 觸發 ----
-    ema1m: number;
-    atr1m: number;
-    kdPeriod: number;
-    kdK: number;
-    kdD: number;
-    /** 回測容差 = touchTol × 1m ATR */
-    touchTol: number;
-    /** 多單 K ≥ 此值拒絕追價（空單 K ≤ 100 − 此值）；100 = 關 */
-    kdChase: number;
-    volumeFilter: boolean;
-    volumeLookback: number;
-    // ---- 15m／60m ----
+    rsiPeriod: number;
     keyBars: number;
-    // ---- 風控（P3 虛擬計畫） ----
+}
+
+export interface EntryParams {
+    /** 虛擬風控採用哪一個進場時機（所有模式都會計算並記錄） */
+    mode: EntryMode;
+    /** 5m 訊號後允許進場的 5m 根數（不跨盤別） */
+    windowBars: number;
+    /** 1m 微型趨勢：1m SuperTrend 的倍數（ATR 週期沿用趨勢參數）；小＝靈敏 */
+    microMult: number;
+    pivotLeft: number;
+    pivotRight: number;
+    /** 回檔深度下限（× 1m ATR14） */
+    minPullbackAtr: number;
+}
+
+export interface RiskConfig {
     budget: number;
     feePerSide: number;
     slipTicks: number;
@@ -50,6 +65,15 @@ export interface TrendSignalConfig {
     tp3Lots: number;
 }
 
+export interface TrendSignalConfig {
+    trend: TrendParams;
+    note: NoteParams;
+    entry: EntryParams;
+    risk: RiskConfig;
+}
+
+// ---- core ----
+
 /** 一個週期的已收 K 棒與每根的時段資訊 */
 export interface TfSeries {
     tf: TfMinutes;
@@ -59,25 +83,30 @@ export interface TfSeries {
     session: string[];
 }
 
-export interface TrendSeries {
-    /** 目前生效那一側的 SuperTrend 值 */
-    st: (number | undefined)[];
-    stUp: (boolean | undefined)[];
-    ema: (number | undefined)[];
-    atr: (number | undefined)[];
-    state: TrendState[];
+// ---- trend ----
+
+/** 某週期的趨勢線與方向（暖身內為 UNKNOWN） */
+export interface TrendTrack {
+    tf: TfMinutes;
+    algo: TrendAlgoId;
+    line: (number | undefined)[];
+    dir: TrendDir[];
+    /** 線就是翻轉價位（可當停損參考）；KAMA 為 false */
+    stopLine: boolean;
 }
 
-export interface M1Indicators {
-    ema: (number | undefined)[];
-    atr: (number | undefined)[];
-    vwap: (number | undefined)[];
-    k: (number | undefined)[];
-    d: (number | undefined)[];
-    session: string[];
+export interface SignalNotes {
+    /** 收盤對 EMA 與 EMA 斜率：同向／逆向／不一致 */
+    ema: 'WITH' | 'AGAINST' | 'MIXED' | 'UNKNOWN';
+    m15: TrendDir;
+    m60: TrendDir;
+    m15Align: Alignment;
+    m60Align: Alignment;
+    m15BarTime: number | null;
+    m60BarTime: number | null;
 }
 
-/** 5m 確認收棒的 BUY / SELL（候選訊號） */
+/** 5m 趨勢切換（主訊號）。只含訊號當時已知的資訊，產生後不再改變。 */
 export interface TrendSignal {
     id: string;
     kind: 'BUY' | 'SELL';
@@ -86,56 +115,34 @@ export interface TrendSignal {
     barTime: number;
     index: number;
     session: string;
-    prevState: TrendState;
+    sessionEnd: number;
     close: number;
-    st: number;
-    ema: number;
+    line: number | undefined;
     atr: number | undefined;
-    /** 最後一個允許 1m 進場的 1m label（含） */
-    expiresAt: number;
-    htf: HtfContext;
+    notes: SignalNotes;
 }
 
-export interface HtfContext {
-    m15: TrendState;
-    m60: TrendState;
-    m15Align: Alignment;
-    m60Align: Alignment;
-    m15BarTime: number | null;
-    m60BarTime: number | null;
-}
+// ---- trigger ----
 
-export type TriggerStatus =
-    | 'ACCEPTED'
-    | 'REJECTED_RISK'
-    | 'REJECTED_CHASE'
-    | 'REJECTED_VOLUME'
-    | 'SKIPPED_POSITION'
-    | 'SKIPPED_USED';
+export type EntryStatus = 'TRIGGERED' | 'EXPIRED' | 'CANCELLED' | 'PENDING';
 
-/** 1m 進場觸發（在 5m 候選內） */
-export interface EntryTrigger {
+/** 1m 進場時機事件（不是委託） */
+export interface EntryEvent {
     id: string;
+    mode: EntryMode;
     signalId: string;
     direction: Direction;
-    /** 1m 收盤 label */
-    barTime: number;
-    index: number;
-    session: string;
-    close: number;
-    ema: number;
-    vwap: number | undefined;
-    k: number;
-    d: number;
-    atr: number;
-    touched: 'EMA' | 'VWAP' | 'BOTH';
-    status: TriggerStatus;
+    status: EntryStatus;
+    /** 觸發條件成立的 K 棒收盤 label（IMMEDIATE = 5m 訊號收棒） */
+    barTime: number | null;
+    /** 觸發 K 棒收盤價（參考價；虛擬成交在下一根 1m 開盤） */
+    refPrice: number | null;
+    /** 窗口最後一個允許觸發的 1m label */
+    windowEnd: number;
     reason: string;
-    plan: RiskPlan | null;
-    /** 決策引用的各週期最新已收 K 棒 */
-    refs: { m5: number; m15: number | null; m60: number | null };
-    htf: HtfContext;
 }
+
+// ---- risk ----
 
 export interface TierPlan {
     r2: number;
@@ -196,10 +203,11 @@ export interface StopChange {
 /** 虛擬部位（觀察／虛擬風控：不送任何委託） */
 export interface VirtualTrade {
     id: string;
-    triggerId: string;
+    entryId: string;
+    entryMode: EntryMode;
     signalId: string;
     direction: Direction;
-    /** 1m 觸發收盤（訊號時間） */
+    /** 進場時機事件的觸發時間（訊號時間） */
     signalTime: number;
     /** 成交所在的 1m K 棒 label（以其開盤價虛擬成交） */
     fillTime: number;
@@ -219,19 +227,12 @@ export interface VirtualTrade {
     closedAt: number | null;
     /** 已實現點數 × 口數（未扣成本） */
     realizedPoints: number;
-    /** 已實現損益（扣手續費與滑價緩衝） */
+    /** 已實現損益（扣手續費；滑價已反映在成交價） */
     realizedNtd: number;
     warnings: string[];
 }
 
-export type AuditKind =
-    | 'SIGNAL'
-    | 'TRIGGER'
-    | 'FILL'
-    | 'EXIT'
-    | 'STOP_MOVE'
-    | 'TARGET'
-    | 'WARN';
+export type AuditKind = 'SIGNAL' | 'ENTRY' | 'FILL' | 'EXIT' | 'STOP_MOVE' | 'TARGET' | 'WARN';
 
 export interface AuditEvent {
     time: number;
@@ -240,67 +241,50 @@ export interface AuditEvent {
     text: string;
 }
 
+// ---- engine ----
+
 export interface TfSnapshot {
     tf: TfMinutes;
-    state: TrendState;
+    dir: TrendDir;
     barTime: number | null;
     close: number | undefined;
-    st: number | undefined;
-    stUp: boolean | undefined;
-    ema: number | undefined;
+    line: number | undefined;
+    /** 目前方向已持續的根數 */
+    age: number | null;
+    /** (收盤 − 趨勢線) ÷ ATR */
+    distAtr: number | undefined;
     atr: number | undefined;
+    rsi: number | undefined;
+    /** 與 5m 的關係（5m 本身為 NEUTRAL） */
     align: Alignment;
     keyHigh: number | undefined;
     keyLow: number | undefined;
 }
 
-export type CandidateStatus = 'NONE' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED' | 'USED';
-
-export type M1Phase =
-    | 'NO_CANDIDATE'
-    | 'WAIT_PULLBACK'
-    | 'WAIT_RECLAIM'
-    | 'WAIT_KD'
-    | 'TRIGGERED'
-    | 'REJECTED'
-    | 'IN_POSITION'
-    | 'UNKNOWN';
-
-export interface M1Snapshot {
-    barTime: number | null;
-    close: number | undefined;
-    ema: number | undefined;
-    vwap: number | undefined;
-    k: number | undefined;
-    d: number | undefined;
-    atr: number | undefined;
-    phase: M1Phase;
-    /** 最近一次回測低點（多）或高點（空） */
-    pullback: number | undefined;
-    /** 持倉中 1m 收盤跌破（多）／站上（空）EMA 且 KD 反向 — 只是警告／減碼參考 */
-    against: boolean;
-}
-
 export interface TrendSignalSnapshot {
+    /** 1m 微型趨勢 */
+    m1: TfSnapshot;
     m5: TfSnapshot;
-    m1: M1Snapshot;
     m15: TfSnapshot;
     m60: TfSnapshot;
-    candidate: { signal: TrendSignal | null; status: CandidateStatus };
+    signal: TrendSignal | null;
+    /** 最新訊號在各進場模式的狀態 */
+    entries: Partial<Record<EntryMode, EntryEvent>>;
     /** 15m 與 60m 都與 5m 反向 */
     htfAgainst: boolean;
     trade: VirtualTrade | null;
-    lastTrigger: EntryTrigger | null;
-    /** 已接受、等待下一個報價虛擬成交的進場 */
-    pendingEntry: { trigger: EntryTrigger; plan: RiskPlan } | null;
-    /** 5m 已確認反轉、等待下一根 1m 開盤平倉 */
+    /** 已觸發、等待下一根 1m 開盤虛擬成交 */
+    pendingEntry: { entry: EntryEvent; plan: RiskPlan } | null;
+    /** 5m 已確認反向、等待下一根 1m 開盤平倉 */
     pendingExit: { signalId: string } | null;
+    /** 持倉中 1m 微型趨勢與部位反向 — 只是警告 */
+    m1Against: boolean;
 }
 
 export interface TrendSignalInput {
     /** 1m K 棒（排序、label 唯一）；label > asOf 的會被忽略 */
     bars1m: Candle[];
-    /** 進行中的 1m K 棒（只含已觀察到的成交）；只用於成交開盤價與停損觸價 */
+    /** 進行中的 1m K 棒（只含已觀察到的成交）；只用於虛擬成交開盤價與停損觸價 */
     live?: Candle | null;
     asOf: number;
     securityType: SecurityType;
@@ -310,6 +294,8 @@ export interface TrendSignalInput {
     /** 每口每點新臺幣；null = 規格未知，不產生風控計畫 */
     pointValue: number | null;
     config: TrendSignalConfig;
+    /** 只供驗證「高週期不影響訊號」：true 時不計算 15m／60m */
+    skipHtf?: boolean;
 }
 
 export interface TrendSignalResult {
@@ -323,12 +309,14 @@ export interface TrendSignalResult {
     m5: TfSeries;
     m15: TfSeries;
     m60: TfSeries;
-    m1Ind: M1Indicators;
-    t5: TrendSeries;
-    t15: TrendSeries;
-    t60: TrendSeries;
+    t1: TrendTrack;
+    t5: TrendTrack;
+    t15: TrendTrack;
+    t60: TrendTrack;
+    /** 5m EMA（註記用，與訊號無關） */
+    ema5: (number | undefined)[];
     signals: TrendSignal[];
-    triggers: EntryTrigger[];
+    entries: EntryEvent[];
     trades: VirtualTrade[];
     events: AuditEvent[];
     snapshot: TrendSignalSnapshot;

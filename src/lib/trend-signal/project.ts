@@ -1,12 +1,12 @@
-// src/lib/trend-signal/project.ts — 把 Trend Signal Pro 結果投影到目前主圖
-// 週期的 K 棒：5m 趨勢線（每根主圖 K 棒取「當時最新已收的 5m」，不偷看
-// 未收的 5m）與訊號標記（依原始收盤時間落在包含它的主圖 K 棒）。
+// src/lib/trend-signal/project.ts — 把 Trend Signal Pro 結果投影到目前主圖週期的
+// K 棒：5m 趨勢線（每根主圖 K 棒取「當時最新已收的 5m」，不偷看未收的 5m）
+// 與訊號標記（依原始收盤時間落在包含它的主圖 K 棒）。
 
 import type { IndicatorPoint } from '../indicators';
 import type { Candle } from '../types/market';
-import { lastAtOrBefore } from './bars';
-import { exitText } from './engine';
-import type { TrendSignalResult } from './types';
+import { lastAtOrBefore } from './core/bars';
+import { exitText } from './risk/virtual';
+import type { EntryMode, TrendSignalResult } from './types';
 
 /** 時間 t 屬於主圖哪一根 K 棒（與 aggregate() 同一個收盤 label 公式） */
 export function chartBucket(t: number, tfMinutes: number): number {
@@ -32,17 +32,17 @@ export function projectLines(res: TrendSignalResult, chartBars: Candle[], tfMinu
     for (const b of chartBars) {
         // 進行中的主圖 K 棒只能用 asOf 之前已收的 5m
         const j = lastAtOrBefore(m5, Math.min(b.time, res.asOf));
-        const st = j >= 0 ? res.t5.st[j] : undefined;
-        const stUp = j >= 0 ? res.t5.stUp[j] : undefined;
-        const e = j >= 0 ? res.t5.ema[j] : undefined;
-        up.push(st !== undefined && stUp === true ? { time: b.time, value: st } : { time: b.time });
-        down.push(st !== undefined && stUp === false ? { time: b.time, value: st } : { time: b.time });
+        const v = j >= 0 ? res.t5.line[j] : undefined;
+        const d = j >= 0 ? res.t5.dir[j] : 'UNKNOWN';
+        const e = j >= 0 ? res.ema5[j] : undefined;
+        up.push(v !== undefined && d === 'UP' ? { time: b.time, value: v } : { time: b.time });
+        down.push(v !== undefined && d === 'DOWN' ? { time: b.time, value: v } : { time: b.time });
         ema.push(e !== undefined ? { time: b.time, value: e } : { time: b.time });
     }
     return { up, down, ema };
 }
 
-export type MarkerKind = 'BUY' | 'SELL' | 'TRIGGER_LONG' | 'TRIGGER_SHORT' | 'EXIT_LONG' | 'EXIT_SHORT';
+export type MarkerKind = 'BUY' | 'SELL' | 'ENTRY_LONG' | 'ENTRY_SHORT' | 'EXIT_LONG' | 'EXIT_SHORT';
 
 export interface TspMarker {
     id: string;
@@ -51,8 +51,21 @@ export interface TspMarker {
     text: string;
 }
 
-/** 標記只放在主圖確實存在的 K 棒上（僅日盤時夜盤訊號不畫） */
-export function projectMarkers(res: TrendSignalResult, chartTimes: Set<number>, tfMinutes: number): TspMarker[] {
+const MODE_TAG: Record<EntryMode, string> = {
+    IMMEDIATE: 'I',
+    MICRO_TREND: 'M',
+    PRICE_STRUCTURE: 'S',
+    PULLBACK_KD: 'K',
+};
+
+/** 標記只放在主圖確實存在的 K 棒上（僅日盤時夜盤訊號不畫）。entryModes：
+ *  要畫進場觸發的模式（IMMEDIATE 與 5m 箭頭同時出現，通常不另畫）。 */
+export function projectMarkers(
+    res: TrendSignalResult,
+    chartTimes: Set<number>,
+    tfMinutes: number,
+    entryModes: EntryMode[],
+): TspMarker[] {
     if (tfMinutes >= 1440) return [];
     const out: TspMarker[] = [];
     const push = (id: string, t: number, kind: MarkerKind, text: string) => {
@@ -60,9 +73,9 @@ export function projectMarkers(res: TrendSignalResult, chartTimes: Set<number>, 
         if (chartTimes.has(time)) out.push({ id, time, kind, text });
     };
     for (const s of res.signals) push(s.id, s.barTime, s.kind, s.kind);
-    for (const t of res.triggers) {
-        if (t.status !== 'ACCEPTED') continue;
-        push(t.id, t.barTime, t.direction === 'LONG' ? 'TRIGGER_LONG' : 'TRIGGER_SHORT', '1m');
+    for (const e of res.entries) {
+        if (e.status !== 'TRIGGERED' || e.barTime === null || !entryModes.includes(e.mode)) continue;
+        push(e.id, e.barTime, e.direction === 'LONG' ? 'ENTRY_LONG' : 'ENTRY_SHORT', MODE_TAG[e.mode]);
     }
     for (const vt of res.trades) {
         for (const f of vt.fills) {

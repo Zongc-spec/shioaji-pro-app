@@ -1,15 +1,15 @@
-// src/lib/trend-signal/bars.ts — canonical confirmed-bar pipeline：
-// 同一份 1m K 棒 → 已收 1m／5m／15m／60m，與當盤（交易時段）VWAP。
-// 週期 K 棒直接用主圖的 aggregate()，確保 Dashboard 與切到該週期的
-// 主圖是同一組 K 棒；進行中的 K 棒一律不進入任何計算。
+// src/lib/trend-signal/core/bars.ts — canonical confirmed-bar pipeline：
+// 同一份 1m K 棒 → 已收 1m／5m／15m／60m。週期 K 棒直接用主圖的
+// aggregate()，確保 Dashboard 與切到該週期的主圖是同一組 K 棒；
+// 進行中的 K 棒一律不進入任何計算。
 
-import { CLOSE_GRACE } from '../intraday-session';
-import type { IndicatorPoint } from '../indicators';
-import type { SecurityType } from '../types/contract';
-import type { Candle } from '../types/market';
-import { aggregate } from '../utils/kbars';
+import { CLOSE_GRACE } from '../../intraday-session';
+import type { IndicatorPoint } from '../../indicators';
+import type { SecurityType } from '../../types/contract';
+import type { Candle } from '../../types/market';
+import { aggregate } from '../../utils/kbars';
 import { tradingSessionOf } from './session';
-import type { TfMinutes, TfSeries } from './types';
+import type { TfMinutes, TfSeries } from '../types';
 
 /** label ≤ asOf 的 1m K 棒才算已收。回傳新陣列：未排序或 label 重複
  *  （後者覆蓋前者）的輸入先正規化。 */
@@ -89,28 +89,6 @@ export function alignPoints(bars: Candle[], pts: IndicatorPoint[]): (number | un
     return bars.map((b) => at.get(b.time));
 }
 
-/** 當盤 VWAP：每個交易時段（日盤／夜盤）重新累積，跨午夜不重設 */
-export function sessionVwap(bars: Candle[], session: string[]): (number | undefined)[] {
-    const out: (number | undefined)[] = [];
-    let key = '';
-    let pv = 0;
-    let vol = 0;
-    for (let i = 0; i < bars.length; i++) {
-        const b = bars[i]!;
-        if (session[i] !== key) {
-            key = session[i]!;
-            pv = 0;
-            vol = 0;
-        }
-        if (b.volume > 0) {
-            pv += ((b.high + b.low + b.close) / 3) * b.volume;
-            vol += b.volume;
-        }
-        out.push(vol > 0 ? pv / vol : undefined);
-    }
-    return out;
-}
-
 /** 最後一根 label ≤ t 的索引（bars 依時間排序）；沒有回 -1 */
 export function lastAtOrBefore(bars: Candle[], t: number): number {
     let lo = 0;
@@ -126,4 +104,9 @@ export function lastAtOrBefore(bars: Candle[], t: number): number {
         }
     }
     return ans;
+}
+
+/** 第一根 label > t 的索引；沒有回 bars.length */
+export function firstAfter(bars: Candle[], t: number): number {
+    return lastAtOrBefore(bars, t) + 1;
 }

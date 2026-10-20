@@ -1,9 +1,9 @@
-// src/lib/trend-signal/session.ts — 交易時段（日盤／夜盤）判定：當盤 VWAP
+// src/lib/trend-signal/core/session.ts — 交易時段（日盤／夜盤）判定：當盤 VWAP
 // 的重設點、訊號 ID 的 session 欄位、候選有效期不跨盤別。沿用
 // intraday-session 的時段定義，只補上收盤定盤（CLOSE_GRACE）歸屬。
 
-import { CLOSE_GRACE, sessionWindowFor, type SessionWindow } from '../intraday-session';
-import type { SecurityType } from '../types/contract';
+import { CLOSE_GRACE, sessionWindowFor, type SessionWindow } from '../../intraday-session';
+import type { SecurityType } from '../../types/contract';
 
 export interface TradingSession extends SessionWindow {
     /** 時段開始日期（台灣）＋ D／N，例：2026-10-20N */
