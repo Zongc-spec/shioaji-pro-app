@@ -97,13 +97,33 @@ BUY/SELL，避免資料起點造成假訊號。
 
 不在本功能範圍內修改；回報 CI 結果時需重跑確認。
 
+## 驗收（P5）
+
+| 項目 | 結果 |
+|---|---|
+| 單元／整合測試 | `npm test`：232 files passed／1 skipped；3585 tests passed／2 skipped（新增 135 個） |
+| 型別檢查與建置 | `npm run build`（`tsc -b` + `vite build`）通過 |
+| 真實資料回放 | 3 演算法 × 2 期間 × 886 步，0 不一致（量測報告結果 5） |
+| 起點不變性 | 373 個起點，暖身後方向與線值一致（量測報告結果 3） |
+| 交易安全 | 靜態測試：TSP 程式（含 UI）不 import 任何下單模組；整合測試全程未呼叫下單／刪單／改價 |
+| 畫面 | `scripts/tsp-demo` 回放展示頁（正式元件、stub 掉歷史／帳戶／下單）以 Windows Chrome headless 截圖；
+  截圖過程發現並修正趨勢線翻轉連線（`b9e1c21`）。截圖：[docs/images/trend-signal-pro-demo.png](../images/trend-signal-pro-demo.png)（合成資料） |
+| 原生 App | **未實測**：本 repo 沒有桌面層（私有 repo），本機也沒有啟動中的 Shioaji server；未登入任何帳號 |
+
+發現的既有問題（改動前即存在，本次未改行為）：
+
+- 內建「SuperTrend 超級趨勢」指標的多空兩線在翻轉處互相連線：lightweight-charts v5 的折線不因 whitespace
+  斷開，`indicators.ts` 註解「with whitespace gaps so the inactive side isn't drawn」的假設不成立。
+  可沿用 `trend-signal/project.ts` 的 `splitTrendLines()` 修正。
+- `candle-chart-order.test.tsx`、`subscription-dispatch.test.ts` 各有一個負載下的計時敏感測試（見上節）。
+
 ## Gate 狀態
 
 | 階段 | 狀態 | 證據 |
 |---|---|---|
 | P0 基線 | 完成 | 本文件 P0 節；`bee79e8` |
-| P1 Signal engine / MTF | 完成 | `e2762fc`：core／trend／trigger；121 個測試（A1–A10、必驗案例 1、2、4、5、6、靜態安全） |
-| P2 UI / Dashboard | 進行中 | — |
-| P3 Risk planner（虛擬） | 純計算完成 | `e2762fc`：risk/plan、risk/virtual；R 面板屬 P2 |
+| P1 Signal engine / MTF | 完成 | `e2762fc`：core／trend／trigger；A1–A10、必驗案例 1、2、4、5、6 |
+| P2 UI / Dashboard | 完成 | `6f0b6b3`、`b9e1c21`：指標選單、趨勢線、標記、Dashboard、虛擬風控面板、審計、1m 小圖 |
+| P3 Risk planner（虛擬） | 完成 | `e2762fc`：risk/plan、risk/virtual；R 面板在 P2 |
 | P4 模擬交易 adapter | **未授權，不實作** | — |
-| P5 Acceptance | 未開始 | — |
+| P5 Acceptance | 完成（原生 App 實測除外） | 上節 |

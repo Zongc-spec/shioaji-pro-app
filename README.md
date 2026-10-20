@@ -70,6 +70,9 @@ Shioaji 1.7.1 的即時計算指數、成分股與產業貢獻，現在整合成
 - **技術指標** — 21 種內建（主圖均線/通道/SAR/SuperTrend，副圖 MACD/RSI/KD
   等震盪指標），TradingView 式選擇器與設定視窗（色盤/線型/時框顯示/
   我的預設），副圖獨立窗格、圖上 legend 即時數值
+- **Trend Signal Pro 趨勢訊號** — 原生內建：5m 紅綠趨勢線與 BUY/SELL（SuperTrend／Donchian／KAMA 可切換）、
+  1m 進場時機（立即／微型趨勢／價格結構）、1m/5m/15m/60m 面板、虛擬 SL／1R／2R／3R 與移動停損、訊號審計；
+  只觀察、不送單（[使用說明](docs/trend-signal-pro.md)）
 - **自訂指標** — 面板內用 JavaScript + `ta.*` 函式庫寫自己的指標
   （`plot()`/`hline()` 宣告輸出），Web Worker 沙箱驗證（自動擋無窮迴圈）、
   自動偵測輸出線，寫完與內建指標同等待遇（設定/樣式/收藏全套）

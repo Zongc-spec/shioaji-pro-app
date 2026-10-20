@@ -157,6 +157,24 @@ Donchian、KAMA 核心的同一組量測（MICRO_TREND 預設）：觸發 56.4%�
 - 依「不得假設等待確認一定比較好」，風控預設採用 IMMEDIATE；MICRO_TREND、PRICE_STRUCTURE 皆可切換，
   三種模式的狀態都會在 Dashboard 與審計中並列。
 
+## 結果 5：真實資料回放驗證（不重繪）
+
+以出貨引擎模擬實際運作（[replay-validation.char.ts](trend-signal-algorithms-2026-10/replay-validation.char.ts)）：
+歷史起點固定在 20 天前，asOf 每 3 分鐘前進一次，涵蓋兩段期間各兩個交易日（日夜盤），三種核心演算法各跑一次；
+每 20 步另注入一根極端的進行中 K 棒（高 1,000 萬、低 1）。
+
+| 演算法 | 期間 | 步數 | 訊號比對 | 進場事件比對 | 成交與停損比對 | 不一致 |
+|---|---|---|---|---|---|---|
+| SuperTrend | 2025-12-15 – 12-17 | 886 | 77,377 | 309,334 | 210,996 | 0 |
+| SuperTrend | 2026-08-24 – 08-26 | 886 | 76,618 | 306,371 | 180,317 | 0 |
+| Donchian | 2025-12-15 – 12-17 | 886 | 70,865 | 283,340 | 196,369 | 0 |
+| Donchian | 2026-08-24 – 08-26 | 886 | 72,726 | 290,749 | 163,645 | 0 |
+| KAMA | 2025-12-15 – 12-17 | 886 | 97,015 | 387,927 | 277,169 | 0 |
+| KAMA | 2026-08-24 – 08-26 | 886 | 88,019 | 351,922 | 253,124 | 0 |
+
+判定：任一時點已出現的訊號之後逐欄相同；已定案的進場事件不變；已發生的虛擬成交、出場與停損變更不變；
+進行中 K 棒的極端值不影響訊號與進場事件。每次引擎執行約 50 ms（20 天、約 2.3 萬根 1m）。
+
 ## 限制
 
 - 單一商品、單一年度、強多頭；結果不能外推到其他商品或盤勢。
@@ -174,5 +192,5 @@ TSP_CHAR_CSV=<1m CSV 路徑> TSP_CHAR_OUT=<輸出目錄> \
   npx vitest run --config "$PWD/$D/vitest.config.mjs" --root "$D"
 ```
 
-輸出 `report.md`、`report.json`、`atr.txt`、`start-invariance.txt`、`entry-modes.md`、`entry-modes.json`。2026-10-20 以同一份資料在 scratch 與
+輸出 `report.md`、`report.json`、`atr.txt`、`start-invariance.txt`、`entry-modes.md`、`entry-modes.json`、`replay-validation.txt`。2026-10-20 以同一份資料在 scratch 與
 repo 內各跑一次，`report.json` 逐欄相同、`start-invariance.txt` 相同。
