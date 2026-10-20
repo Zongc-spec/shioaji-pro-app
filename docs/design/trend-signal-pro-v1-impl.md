@@ -74,13 +74,35 @@ BUY/SELL，避免資料起點造成假訊號。
 在 UI 顯示為停用；`read_only = true`、`auto_entry = false`、`auto_exit = false`
 是常數。
 
+## 2026-10-20 方向調整（P1 途中）
+
+使用者釐清目標：Trend Signal Pro 是**獨立趨勢指標**（功能對齊 Universal Indicator Ultimate AI 的公開描述），
+不是把規格 §1.1／§1.2 的交易策略假說包裝成指標。處理：
+
+- P1 草稿完整保存為 `d05e7e9`，不刪除；盤點與分類見 [重設計提案](trend-signal-pro-v1-redesign.md) §2。
+- EMA9／VWAP／KD Trigger 停止擴充，保留為可選模式。
+- 以真實 TMF 資料量測候選演算法與 1m 進場時機：[量測報告](../research/trend-signal-algorithms-2026-10.md)。
+- 設計決策修正（確認後生效）：D1 視窗 10 天 → 20 天；D5 暖身改為 15 × ATR 週期（量測依據）；
+  D6 候選窗口不跨盤別，歸 Entry Trigger 模組；D7、D8 歸風控模組。
+
+既有測試觀察（不穩定測試，與本功能無關）：完整 `npm test` 偶發 1 個失敗，出現過兩個測試：
+`candle-chart-order.test.tsx`「refuses a pending chart order at dispatch after switch back changes」（1 次）與
+`subscription-dispatch.test.ts`「sends a subscription request when the mode stays current for
+/api/v1/stream/unsubscribe/scanner」（多次）。證據：
+
+- 在改動前的基線 `6efd140`（暫時 worktree）完整執行 5 次，後者失敗 3 次 → 既有問題。
+- 兩者單獨執行各 5 次全過。
+- 後者使用 `vi.resetModules()` ＋ 動態 import ＋ 預設 1 秒的 `vi.waitFor`，屬負載下的計時敏感測試。
+
+不在本功能範圍內修改；回報 CI 結果時需重跑確認。
+
 ## Gate 狀態
 
 | 階段 | 狀態 | 證據 |
 |---|---|---|
-| P0 基線 | 完成 | 本節 |
-| P1 Signal engine / MTF | 進行中 | — |
+| P0 基線 | 完成 | 本文件 P0 節；`bee79e8` |
+| P1 Signal engine / MTF | **暫停：等待核心訊號設計確認** | 草稿 `d05e7e9`；提案與量測報告 |
 | P2 UI / Dashboard | 未開始 | — |
-| P3 Risk planner（虛擬） | 未開始 | — |
+| P3 Risk planner（虛擬） | 未開始（`risk.ts` 草稿已有） | — |
 | P4 模擬交易 adapter | **未授權，不實作** | — |
 | P5 Acceptance | 未開始 | — |
