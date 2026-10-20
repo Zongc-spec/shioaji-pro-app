@@ -10,6 +10,7 @@ import {
     CandlestickSeries,
     ColorType,
     createChart,
+    createSeriesMarkers,
     HistogramSeries,
     LineSeries,
     LineStyle,
@@ -17,8 +18,11 @@ import {
     type IChartApi,
     type IPriceLine,
     type ISeriesApi,
+    type ISeriesMarkersPluginApi,
     type MouseEventParams,
     type SeriesDataItemTypeMap,
+    type SeriesMarker,
+    type Time,
     type UTCTimestamp,
 } from 'lightweight-charts';
 import {
@@ -146,6 +150,12 @@ import { toolDef } from '../lib/chart-drawings';
 import { AsyncStatus } from './async-status';
 import * as panel from './panel.css';
 import { orderStatusWithNumber } from '../lib/order-status-label';
+import { useTrendSignal } from '../hooks/use-trend-signal';
+import { configFromParams, TSP_TYPE } from '../lib/trend-signal/config';
+import { chartBucket, projectMarkers, type TspMarker } from '../lib/trend-signal/project';
+import type { EntryMode } from '../lib/trend-signal/types';
+import { TrendSignalPanel, useTspAlerts, useTspPrefs } from './trend-signal-panel';
+import { TrendSignalMiniChart } from './trend-signal-mini-chart';
 
 // NOTE: the kbars API only serves 1-minute bars, so 1D aggregates a huge
 // payload (a year of TXF ≈ 280k bars / 18MB) — keep the range tight enough
@@ -245,6 +255,8 @@ export function CandleChart({
         onShowHighLowChange?.(!showHighLow);
     };
     const highLowRef = useRef<HighLowLayer | null>(null);
+    // Trend Signal Pro 的 BUY/SELL／進場／出場標記（K 棒 series 上唯一的 markers plugin）
+    const tspMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
     // 讀值列自己訂閱這個 store：讀值變動只重繪讀值列
     const ohlcStore = useMemo(createOhlcStore, []);
     const [hostWidth, setHostWidth] = useState(0);
@@ -439,6 +451,18 @@ export function CandleChart({
             ? savedInstances.map(i => i.id === settingsDraft.id ? settingsDraft : i)
             : [...savedInstances, settingsDraft]
         : savedInstances;
+    // Trend Signal Pro：同一張圖以第一個可見的實例驅動 canonical 1m 計算、標記與面板
+    // （只觀察，不下單）。組合商品沒有單一合約的 1m，不支援
+    const tspInst = instances.find((i) => i.type === TSP_TYPE && !i.hidden && (!i.visibleTf || i.visibleTf.includes(tf.minutes))) ?? null;
+    const tspParamsKey = JSON.stringify(tspInst?.params ?? {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const tspConfig = useMemo(() => configFromParams(tspInst?.params ?? {}), [tspParamsKey]);
+    const tsp = useTrendSignal(contract, !!tspInst && !isCombo, tspInst?.params ?? {}, historySeq);
+    const [tspPrefs, setTspPrefs] = useTspPrefs(tspInst?.id ?? null);
+    useTspAlerts(tsp, tspPrefs.mode, (a) => notify(a));
+    const tspResult = tspInst ? tsp.result : null;
+    // 趨勢線只在 5m 收棒時改變：以 5m 根數與最後時間決定何時重建指標序列
+    const tspLineKey = tspResult ? `${tspResult.configKey}|${tspResult.m5.bars.length}|${tspResult.m5.bars[tspResult.m5.bars.length - 1]?.time ?? 0}` : 'none';
     const [pickerOpen, setPickerOpen] = useState(false);
     const [settingsFor, setSettingsFor] = useState<string | null>(null);
     const [legendMenuFor, setLegendMenuFor] = useState<string | null>(null);
@@ -628,6 +652,7 @@ export function CandleChart({
         const highLow = new HighLowLayer({ ...highLowColors(c), visible: false, format: (p) => String(p) });
         candles.attachPrimitive(highLow);
         highLowRef.current = highLow;
+        tspMarkersRef.current = createSeriesMarkers(candles, []);
 
         chart.subscribeClick((param) => {
             // 第二道防線：畫圖選取／草稿／拖曳／文字／量測均不能進入下單路徑。
@@ -761,6 +786,7 @@ export function CandleChart({
             candleSeriesRef.current = null;
             volSeriesRef.current = null;
             highLowRef.current = null;
+            tspMarkersRef.current = null;
         };
     }, []);
 
@@ -1190,7 +1216,11 @@ export function CandleChart({
             }
             let out: Record<string, IndicatorPoint[]>;
             try {
-                out = def.compute(bars, params);
+                // TSP 用圖表共用的 canonical 結果；尚未算好時傳 null（先不畫）
+                out = def.compute(bars, params, {
+                    tfMinutes: tf.minutes,
+                    trendSignal: def.type === TSP_TYPE ? (tspResult ?? null) : undefined,
+                });
             } catch {
                 continue; // a bad param combination must not kill the chart
             }
@@ -1381,7 +1411,72 @@ export function CandleChart({
             paneRoRef.current?.disconnect();
             paneRoRef.current = null;
         };
-    }, [dataVersion, instancesKey, themeKey, tf.minutes, customVer]);
+    }, [dataVersion, instancesKey, themeKey, tf.minutes, customVer, tspLineKey]);
+
+    // Trend Signal Pro 標記：BUY/SELL 箭頭、風控採用模式的進場點、虛擬出場（依原始收棒
+    // 時間落在包含它的主圖 K 棒）
+    const tspMarkerKey = tspResult
+        ? `${tspResult.signals.length}|${tspResult.entries.filter((e) => e.status === 'TRIGGERED').length}|${tspResult.trades.reduce((n, t) => n + t.fills.length, 0)}|${tspResult.trades.length}|${tspConfig.entry.mode}`
+        : 'none';
+    useEffect(() => {
+        const plugin = tspMarkersRef.current;
+        if (!plugin) return;
+        if (!tspResult) {
+            plugin.setMarkers([]);
+            return;
+        }
+        const modes: EntryMode[] = tspConfig.entry.mode === 'IMMEDIATE' ? [] : [tspConfig.entry.mode];
+        const times = new Set(barsRef.current.map((b) => b.time));
+        plugin.setMarkers(projectMarkers(tspResult, times, tf.minutes, modes).map(tspMarker));
+        // tspResult 以 tspMarkerKey 代表；每 2 秒的新結果不必重設標記
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tspMarkerKey, dataVersion, tf.minutes]);
+
+    // Trend Signal Pro 虛擬部位的 SL／1R／2R／3R 與動態停損（階梯線）。獨立 series、
+    // 不加在 K 棒 series 的 price line 上（不與可拖曳的委託線混淆），也不參與自動縮放
+    const tspOpen = tspResult?.snapshot.trade?.status === 'OPEN' ? tspResult.snapshot.trade : null;
+    const tspRiskKey = tspOpen ? `${tspOpen.id}|${tspOpen.stopHistory.length}|${tspOpen.openQty}` : 'none';
+    useEffect(() => {
+        const chart = chartRef.current;
+        const bars = barsRef.current;
+        if (!chart || !tspOpen || bars.length === 0) return;
+        const first = bars[0]!.time;
+        const end = bars[bars.length - 1]!.time;
+        const start = Math.max(first, chartBucket(tspOpen.fillTime, tf.minutes));
+        if (start > end) return;
+        const quiet = { priceLineVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: () => null };
+        const level = (price: number, color: string, title: string, lineStyle: LineStyle) => {
+            const s = chart.addSeries(LineSeries, { color, lineWidth: 1, lineStyle, lastValueVisible: true, title, ...quiet });
+            s.setData(start === end
+                ? [{ time: start as UTCTimestamp, value: price }]
+                : [{ time: start as UTCTimestamp, value: price }, { time: end as UTCTimestamp, value: price }]);
+            return s;
+        };
+        const p = tspOpen.plan;
+        const created = [
+            level(p.stop, '#ff4d6a', 'TSP SL', LineStyle.Dashed),
+            level(p.r1, '#7fbf9f', '1R', LineStyle.Dotted),
+            level(p.r2, '#7fbf9f', '2R', LineStyle.Dotted),
+            level(p.r3, '#7fbf9f', '3R', LineStyle.Dotted),
+        ];
+        const stop = chart.addSeries(LineSeries, { color: '#e0a43c', lineWidth: 2, lineType: LineType.WithSteps, lastValueVisible: true, title: 'TSP Stop', ...quiet });
+        const pts = new Map<number, number>();
+        for (const h of tspOpen.stopHistory) pts.set(Math.max(start, chartBucket(h.time, tf.minutes)), h.stop);
+        pts.set(end, tspOpen.stop);
+        stop.setData([...pts].filter(([t]) => t <= end).sort((a, b) => a[0] - b[0]).map(([t, v]) => ({ time: t as UTCTimestamp, value: v })));
+        created.push(stop);
+        return () => {
+            for (const s of created) {
+                try {
+                    chart.removeSeries(s);
+                } catch {
+                    // chart already torn down
+                }
+            }
+        };
+        // tspOpen 以 tspRiskKey 代表
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tspRiskKey, tf.minutes, dataVersion]);
 
     const commitInstances = (list: IndicatorInstance[]) => {
         if (panelService && panelId && panelState) {
@@ -2304,7 +2399,23 @@ export function CandleChart({
                     );
                 })}
                 <ChartDrawingOverlays api={drawings} />
+                {tspInst && (isCombo ? (
+                    <div className={styles.tspUnsupported}>Trend Signal Pro：組合商品沒有單一合約的 1m K 棒，不支援</div>
+                ) : (
+                    <TrendSignalPanel
+                        feed={tsp}
+                        config={tspConfig}
+                        contract={contract}
+                        lastPrice={lastPriceRef.current}
+                        prefs={tspPrefs}
+                        onPrefs={setTspPrefs}
+                        right={(chartRef.current?.priceScale('right').width() ?? 56) + 8}
+                    />
+                ))}
             </div>
+            {tspInst && !isCombo && tspPrefs.mini && (
+                <TrendSignalMiniChart result={tspResult} colors={colors} onClose={() => setTspPrefs({ mini: false })} />
+            )}
             <ChartObjectList api={drawings} />
             </div>
         </div>
@@ -2335,6 +2446,20 @@ function drawingPnlPerPoint(
     }
     if (market === 'S') return s.qty * (s.lot === 'IntradayOdd' ? 1 : 1000);
     return null;
+}
+
+// Trend Signal Pro 標記 → lightweight-charts marker。多空色固定綠／紅（與趨勢線一致），
+// 不隨紅漲綠跌設定翻轉
+function tspMarker(m: TspMarker): SeriesMarker<Time> {
+    const time = m.time as UTCTimestamp;
+    switch (m.kind) {
+        case 'BUY': return { time, position: 'belowBar', shape: 'arrowUp', color: '#1fd286', text: 'BUY' };
+        case 'SELL': return { time, position: 'aboveBar', shape: 'arrowDown', color: '#ff4d6a', text: 'SELL' };
+        case 'ENTRY_LONG': return { time, position: 'belowBar', shape: 'circle', color: '#19b6c9', text: m.text };
+        case 'ENTRY_SHORT': return { time, position: 'aboveBar', shape: 'circle', color: '#19b6c9', text: m.text };
+        case 'EXIT_LONG': return { time, position: 'aboveBar', shape: 'square', color: '#8b94a7', text: m.text };
+        case 'EXIT_SHORT': return { time, position: 'belowBar', shape: 'square', color: '#8b94a7', text: m.text };
+    }
 }
 
 // 最高標記用漲色、最低用跌色（跟著紅漲綠跌／綠漲紅跌設定）；字樣與底色

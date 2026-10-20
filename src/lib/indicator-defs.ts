@@ -27,6 +27,9 @@ import {
     wma,
     type IndicatorPoint,
 } from './indicators';
+import { configFromParams, configKey, TREND_ALGOS, TSP_PARAMS, TSP_TYPE } from './trend-signal/config';
+import { projectLines, standaloneLines } from './trend-signal/project';
+import type { TrendSignalResult } from './trend-signal/types';
 import type { Candle } from './types/market';
 
 export type OutputKind = 'line' | 'dashed' | 'histogram' | 'points';
@@ -48,6 +51,16 @@ export interface OutputDef {
     width?: 1 | 2;
     // histogram only: color positive/negative halves with up/down colors
     signed?: boolean;
+    // 預設線型（使用者可在樣式分頁改）
+    plot?: PlotKind;
+}
+
+// compute 的額外資訊（選填，舊指標不用）
+export interface IndicatorComputeContext {
+    tfMinutes: number;
+    // Trend Signal Pro：原生 K 線圖共用的已收棒 MTF 結果。null = 原生圖但尚未算好
+    // （不畫，避免先畫簡化線再換成正式線）；undefined = 沒有 canonical 資料的圖表
+    trendSignal?: TrendSignalResult | null;
 }
 
 export interface IndicatorDef {
@@ -61,10 +74,36 @@ export interface IndicatorDef {
     outputs: OutputDef[];
     // horizontal reference levels drawn in the sub-pane (e.g. RSI 30/70)
     levels?: number[];
+    // legend 標籤（預設為全部參數，如 MA(20)）
+    labelFor?: (p: Record<string, number>) => string;
     compute: (
         bars: Candle[],
         p: Record<string, number>,
+        ctx?: IndicatorComputeContext,
     ) => Record<string, IndicatorPoint[]>;
+}
+
+const TSP_ALGO_LABEL = ['ST', 'DC', 'KAMA'];
+
+function tspLabel(p: Record<string, number>): string {
+    const cfg = configFromParams(p);
+    const t = cfg.trend;
+    const algo = TSP_ALGO_LABEL[TREND_ALGOS.indexOf(t.algo)] ?? 'ST';
+    const args = t.algo === 'donchian' ? `${t.dcLength}` : t.algo === 'kama' ? `${t.kamaLength},${t.kamaFast},${t.kamaSlow}` : `${t.stPeriod}×${t.stMult}`;
+    return `TSP(${algo} ${args})`;
+}
+
+function tspLines(bars: Candle[], p: Record<string, number>, ctx?: IndicatorComputeContext): Record<string, IndicatorPoint[]> {
+    const cfg = configFromParams(p);
+    const res = ctx?.trendSignal;
+    if (res === null) return { up: [], down: [], ema: [] };
+    // 只用參數完全相同的那份結果（同圖第二個 TSP 實例走簡化投影）
+    if (res && res.configKey === configKey(cfg)) {
+        const l = projectLines(res, bars, ctx!.tfMinutes);
+        return { up: l.up, down: l.down, ema: l.ema };
+    }
+    const l = standaloneLines(bars, ctx?.tfMinutes ?? 5, cfg);
+    return { up: l.up, down: l.down, ema: l.ema };
 }
 
 export const INDICATOR_DEFS: IndicatorDef[] = [
@@ -171,6 +210,24 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
             const r = supertrend(b, p.period!, p.mult!);
             return { up: r.up, down: r.down };
         },
+    },
+    {
+        // 原生內建：5m 主控趨勢訊號、1m 進場時機、四週期面板與虛擬風控（只觀察，
+        // 不下單）。自行設計的公開演算法，非任何商業指標的原版。
+        type: TSP_TYPE,
+        label: 'Trend Signal Pro 趨勢訊號',
+        short: 'TSP',
+        desc: '5m 紅綠趨勢線與 BUY/SELL；1m 進場時機、四週期面板、虛擬風控（只觀察，不下單）',
+        aliases: ['trend signal pro', 'tsp', 'trend', '趨勢訊號', '趨勢', '多空', 'buy', 'sell', 'supertrend', 'donchian', 'kama', 'mtf'],
+        category: 'overlay',
+        params: TSP_PARAMS,
+        outputs: [
+            { key: 'up', label: '5m 多頭趨勢線', kind: 'line', color: '#1fd286', width: 2, plot: 'step' },
+            { key: 'down', label: '5m 空頭趨勢線', kind: 'line', color: '#ff4d6a', width: 2, plot: 'step' },
+            { key: 'ema', label: '5m EMA（註記）', kind: 'dashed', color: '#8b94a7' },
+        ],
+        labelFor: tspLabel,
+        compute: tspLines,
     },
     {
         type: 'donchian',
@@ -445,6 +502,7 @@ export function outputStyle(
         opacity: s.opacity ?? 100,
         plot:
             s.plot ??
+            out?.plot ??
             (out?.kind === 'histogram'
                 ? 'histogram'
                 : out?.kind === 'points'
@@ -465,6 +523,7 @@ export function colorWithOpacity(hex: string, opacity: number): string {
 export function instanceLabel(inst: IndicatorInstance): string {
     const def = DEF_BY_TYPE.get(inst.type);
     if (!def) return inst.type;
+    if (def.labelFor) return def.labelFor(inst.params);
     const args = def.params.map((p) => inst.params[p.key] ?? p.def);
     return args.length > 0 ? `${def.short}(${args.join(',')})` : def.short;
 }

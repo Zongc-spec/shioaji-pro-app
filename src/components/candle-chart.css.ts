@@ -392,3 +392,18 @@ export const ohlcLabel = style({
     fontSize: '0.6rem',
     color: vars.color.mutedForeground,
 });
+
+// Trend Signal Pro 不支援的商品（組合商品）提示
+export const tspUnsupported = style({
+    position: 'absolute',
+    top: '8px',
+    right: '72px',
+    zIndex: 6,
+    padding: '3px 8px',
+    borderRadius: vars.radius.sm,
+    border: `1px solid ${vars.color.border}`,
+    background: vars.color.panelRaised,
+    color: vars.color.mutedForeground,
+    fontFamily: vars.font.body,
+    fontSize: '0.64rem',
+});

@@ -59,7 +59,7 @@ export function renderIndicatorSeries(
         }
         let out: Record<string, IndicatorPoint[]>;
         try {
-            out = def.compute(bars, params);
+            out = def.compute(bars, params, { tfMinutes });
         } catch {
             continue; // 壞參數/壞自訂碼不能拖垮圖表
         }

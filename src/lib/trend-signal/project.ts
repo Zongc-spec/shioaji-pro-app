@@ -4,9 +4,11 @@
 
 import type { IndicatorPoint } from '../indicators';
 import type { Candle } from '../types/market';
+import { aggregate } from '../utils/kbars';
 import { lastAtOrBefore } from './core/bars';
 import { exitText } from './risk/virtual';
-import type { EntryMode, TrendSignalResult } from './types';
+import { emaSeries, trendTrack } from './trend/signals';
+import type { EntryMode, TrendSignalConfig, TrendSignalResult } from './types';
 
 /** 時間 t 屬於主圖哪一根 K 棒（與 aggregate() 同一個收盤 label 公式） */
 export function chartBucket(t: number, tfMinutes: number): number {
@@ -37,6 +39,29 @@ export function projectLines(res: TrendSignalResult, chartBars: Candle[], tfMinu
         const e = j >= 0 ? res.ema5[j] : undefined;
         up.push(v !== undefined && d === 'UP' ? { time: b.time, value: v } : { time: b.time });
         down.push(v !== undefined && d === 'DOWN' ? { time: b.time, value: v } : { time: b.time });
+        ema.push(e !== undefined ? { time: b.time, value: e } : { time: b.time });
+    }
+    return { up, down, ema };
+}
+
+/** 沒有 canonical 1m 結果的圖表（例：回測圖）：只能從手上的 1m／5m K 棒自己算 5m
+ *  趨勢線，視所有 K 棒為已收；15m 以上無法還原 5m，不畫。原生 K 線圖不走這裡。 */
+export function standaloneLines(bars: Candle[], tfMinutes: number, cfg: TrendSignalConfig): ProjectedLines {
+    const empty = { up: [], down: [], ema: [] };
+    if (bars.length === 0 || tfMinutes > 5 || 5 % tfMinutes !== 0) return empty;
+    const m5 = tfMinutes === 5 ? bars : aggregate(bars, 5);
+    const t5 = trendTrack({ tf: 5, bars: m5, lastMinute: m5.map((b) => b.time), session: m5.map(() => '') }, cfg.trend);
+    const ema5 = emaSeries(m5, cfg.note);
+    const up: IndicatorPoint[] = [];
+    const down: IndicatorPoint[] = [];
+    const ema: IndicatorPoint[] = [];
+    for (const b of bars) {
+        const j = lastAtOrBefore(m5, b.time);
+        const v = j >= 0 ? t5.line[j] : undefined;
+        const d = j >= 0 ? t5.dir[j] : 'UNKNOWN';
+        up.push(v !== undefined && d === 'UP' ? { time: b.time, value: v } : { time: b.time });
+        down.push(v !== undefined && d === 'DOWN' ? { time: b.time, value: v } : { time: b.time });
+        const e = j >= 0 ? ema5[j] : undefined;
         ema.push(e !== undefined ? { time: b.time, value: e } : { time: b.time });
     }
     return { up, down, ema };

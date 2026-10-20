@@ -33,6 +33,15 @@ export function contractMultiplier(contract: ContractInfo): number {
     return 50; // index products default (TXO-style)
 }
 
+/** 期貨每口每點新臺幣：API 的 multiplier 優先，其次已知根代碼；都沒有回 null。
+ *  風控計畫用這個（不像成本試算退回預設 50），規格未知就不估金額。 */
+export function futuresPointValue(contract: Partial<ContractInfo>): number | null {
+    if (contract.security_type !== 'FUT') return null;
+    if (contract.multiplier && contract.multiplier > 0) return contract.multiplier;
+    const root = contract.root ?? contract.category;
+    return (root ? FUT_MULTIPLIER[root] : undefined) ?? null;
+}
+
 // 期交稅率 per product family (per side, on contract value):
 // equity-type futures 0.00002; options 0.001 on premium;
 // gold futures 0.0000025; interest-rate futures 0.00000125
