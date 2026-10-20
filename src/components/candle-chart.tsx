@@ -1197,7 +1197,9 @@ export function CandleChart({
             pts.map((p) =>
                 p.value === undefined
                     ? { time: p.time as UTCTimestamp }
-                    : { time: p.time as UTCTimestamp, value: p.value },
+                    : p.color !== undefined
+                      ? { time: p.time as UTCTimestamp, value: p.value, color: p.color }
+                      : { time: p.time as UTCTimestamp, value: p.value },
             ) as SeriesDataItemTypeMap['Line'][];
 
         let paneIdx = 1;

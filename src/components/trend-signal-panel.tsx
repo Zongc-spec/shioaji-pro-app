@@ -32,10 +32,11 @@ export type TspMode = 'observe' | 'alert';
 export interface TspPrefs {
     mode: TspMode;
     collapsed: boolean;
+    riskCollapsed: boolean;
     mini: boolean;
 }
 const PREFS_KEY = 'sj-pro-tsp-ui-v1';
-const DEFAULT_PREFS: TspPrefs = { mode: 'observe', collapsed: false, mini: false };
+const DEFAULT_PREFS: TspPrefs = { mode: 'observe', collapsed: false, riskCollapsed: false, mini: false };
 
 function loadAllPrefs(): Record<string, Partial<TspPrefs>> {
     try {
@@ -218,7 +219,7 @@ export function TrendSignalPanel({
         <>
             <div className={s.dashboard} style={{ right }}>
                 <div className={s.header}>
-                    <span className={s.headerTitle}>Trend Signal Pro · {ALGO_TEXT[config.trend.algo]}</span>
+                    <span className={s.headerTitle} title='Trend Signal Pro'>TSP · {ALGO_TEXT[config.trend.algo]}</span>
                     <select
                         className={s.select}
                         value={prefs.mode}
@@ -284,11 +285,17 @@ export function TrendSignalPanel({
                     <div className={s.note}>★ 為虛擬風控採用的進場時機。自行設計的公開演算法，非 Universal Indicator／Ultimate AI 原版。</div>
                 </div>
             </div>
-            {res && (
+            {res && prefs.riskCollapsed && (
+                <button className={s.riskChip} style={{ right }} onClick={() => onPrefs({ riskCollapsed: false })} title='展開虛擬風控'>
+                    虛擬風控 · {open ? `${open.direction === 'LONG' ? '多' : '空'} ${open.openQty} 口 停損 ${px(open.stop)}` : pending ? '待成交' : '無部位'}
+                </button>
+            )}
+            {res && !prefs.riskCollapsed && (
                 <div className={s.riskCard} style={{ right }}>
                     <div className={s.header}>
                         <span className={s.headerTitle}>虛擬風控 · {res.symbol}</span>
                         <span className={s.note}>觀察模式（無帳號）</span>
+                        <button className={s.btn} onClick={() => onPrefs({ riskCollapsed: true })} title='收合'>—</button>
                     </div>
                     <div className={s.body}>
                         {res.snapshot.trade === null && !pending && <div className={s.note}>目前無虛擬部位</div>}
@@ -297,22 +304,31 @@ export function TrendSignalPanel({
                                 {MODE_TEXT[pending.entry.mode]}已觸發 {hm(pending.entry.barTime)}：待下一根 1m 開盤虛擬成交 · 參考 {px(pending.plan.entry)} · 停損 {px(pending.plan.stop)} · R {pending.plan.riskPoints} 點／{money(pending.plan.totalRisk)} · {pending.plan.qty} 口
                             </div>
                         )}
-                        {trade && (
+                        {trade && trade.status === 'CLOSED' && !pending && (
                             <>
                                 <div>
-                                    <span className={s.dir[trade.direction === 'LONG' ? 'UP' : 'DOWN']}>{trade.direction === 'LONG' ? '多' : '空'}</span>{' '}
-                                    {trade.openQty}/{trade.qty} 口 @ {px(trade.fillPrice)}（{hm(trade.fillTime - 60)} 成交，{MODE_TEXT[trade.entryMode]}觸發 {hm(trade.signalTime)}）
-                                    {trade.status === 'CLOSED' && <span className={s.note}> · 已出場（{trade.exitReason ? exitText(trade.exitReason) : ''}）</span>}
+                                    上一筆（已出場）：<span className={s.dir[trade.direction === 'LONG' ? 'UP' : 'DOWN']}>{trade.direction === 'LONG' ? '多' : '空'}</span>{' '}
+                                    {trade.qty} 口 @ {px(trade.fillPrice)}（{hm(trade.fillTime - 60)} 成交，{MODE_TEXT[trade.entryMode]}觸發 {hm(trade.signalTime)}）
                                 </div>
-                                <div>初始停損 {px(trade.plan.stop)}（{trade.plan.stopBasis === 'swing' ? '擺動點' : trade.plan.stopBasis === 'atr' ? '1m ATR' : 'ATR 備援'}）· R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)}</div>
-                                <div>1R {px(trade.plan.r1)} · 2R {px(trade.plan.r2)} · 3R {px(trade.plan.r3)} · 保本 {px(trade.plan.breakevenStop)}</div>
-                                <div>目前停損 {px(trade.stop)}（{trade.stopKind === 'initial' ? '初始' : trade.stopKind === 'breakeven' ? '保本' : '移動'}）{trade.trailing ? ' · 移動停損啟動' : ''}</div>
+                                <div>出場：{trade.fills.map((f) => `${exitText(f.reason)} ${f.qty} 口 @ ${px(f.price)}（${hm(f.time)}）`).join('；')}</div>
+                                <div>初始停損 {px(trade.plan.stop)} · R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)} · 已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點／{money(trade.realizedNtd)}（虛擬，扣手續費）</div>
+                            </>
+                        )}
+                        {open && (
+                            <>
+                                <div>
+                                    <span className={s.dir[open.direction === 'LONG' ? 'UP' : 'DOWN']}>{open.direction === 'LONG' ? '多' : '空'}</span>{' '}
+                                    {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{hm(open.fillTime - 60)} 成交，{MODE_TEXT[open.entryMode]}觸發 {hm(open.signalTime)}）
+                                </div>
+                                <div>初始停損 {px(open.plan.stop)}（{open.plan.stopBasis === 'swing' ? '擺動點' : open.plan.stopBasis === 'atr' ? '1m ATR' : 'ATR 備援'}）· R {open.plan.riskPoints} 點／{money(open.plan.riskPerLot * open.qty)}</div>
+                                <div>1R {px(open.plan.r1)} · 2R {px(open.plan.r2)} · 3R {px(open.plan.r3)} · 保本 {px(open.plan.breakevenStop)}</div>
+                                <div>目前停損 {px(open.stop)}（{open.stopKind === 'initial' ? '初始' : open.stopKind === 'breakeven' ? '保本' : '移動'}）{open.trailing ? ' · 移動停損啟動' : ''}</div>
                                 <div>
                                     {unrealPts !== null && unrealNtd !== null && <>未實現 {unrealPts >= 0 ? '+' : ''}{unrealPts} 點／{money(unrealNtd)} · </>}
-                                    已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點／{money(trade.realizedNtd)}（虛擬，扣手續費）
+                                    已實現 {open.realizedPoints >= 0 ? '+' : ''}{open.realizedPoints} 點／{money(open.realizedNtd)}（虛擬，扣手續費）
                                 </div>
                                 {snap?.pendingExit && <div className={s.warn}>5m 已確認反向：下一根 1m 開盤平倉（不等 1m）</div>}
-                                {trade.warnings.map((w) => <div key={w} className={s.warn}>⚠ {w}</div>)}
+                                {open.warnings.map((w) => <div key={w} className={s.warn}>⚠ {w}</div>)}
                             </>
                         )}
                         <div className={s.note}>保護單：虛擬 — 未送出任何委託（read_only={String(TSP_PERMISSIONS.read_only)}）。預估風險不是損失上限。</div>

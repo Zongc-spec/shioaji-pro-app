@@ -51,6 +51,7 @@ export const btn = style({
 export const btnOn = style([btn, { color: vars.color.foreground, background: vars.color.muted }]);
 
 export const select = style({
+    maxWidth: '76px',
     fontFamily: vars.font.body,
     fontSize: '0.6rem',
     background: vars.color.inset,
@@ -87,6 +88,16 @@ export const badge = styleVariants({
     down: { color: vars.color.danger },
     idle: { color: vars.color.mutedForeground },
 });
+
+export const riskChip = style([
+    card,
+    {
+        bottom: '34px',
+        padding: '3px 8px',
+        cursor: 'pointer',
+        fontFamily: vars.font.body,
+    },
+]);
 
 export const warn = style({ color: vars.color.amber, fontFamily: vars.font.body });
 export const note = style({ color: vars.color.mutedForeground, fontFamily: vars.font.body, fontSize: '0.58rem' });

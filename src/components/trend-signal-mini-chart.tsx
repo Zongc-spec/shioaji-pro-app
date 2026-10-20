@@ -18,6 +18,7 @@ import {
 } from 'lightweight-charts';
 import { useEffect, useRef } from 'react';
 import type { TrendSignalResult } from '../lib/trend-signal/types';
+import { splitTrendLines } from '../lib/trend-signal/project';
 import { exitText } from '../lib/trend-signal/risk/virtual';
 import type { ChartColors } from '../lib/theme-store';
 import * as s from './trend-signal-panel.css';
@@ -48,7 +49,8 @@ export function TrendSignalMiniChart({ result, colors, onClose }: { result: Tren
         const candles = chart.addSeries(CandlestickSeries, {
             upColor: colors.up, downColor: colors.down, borderUpColor: colors.up, borderDownColor: colors.down, wickUpColor: colors.up, wickDownColor: colors.down,
         });
-        const line = { lineWidth: 2 as const, lineType: LineType.WithSteps, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+        // 一般折線＋點顏色斷線（階梯線的垂直段用下一點顏色，見 splitTrendLines）
+        const line = { lineWidth: 2 as const, lineType: LineType.Simple, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
         upRef.current = chart.addSeries(LineSeries, { ...line, color: '#1fd286' });
         downRef.current = chart.addSeries(LineSeries, { ...line, color: '#ff4d6a' });
         chartRef.current = chart;
@@ -81,15 +83,11 @@ export function TrendSignalMiniChart({ result, colors, onClose }: { result: Tren
         const from = Math.max(0, bars.length - BARS);
         const view = bars.slice(from);
         candles.setData(view.map((b) => ({ time: b.time as UTCTimestamp, open: b.open, high: b.high, low: b.low, close: b.close })));
-        const up = [];
-        const down = [];
-        for (let i = from; i < bars.length; i++) {
-            const t = bars[i]!.time as UTCTimestamp;
-            const v = result.t1.line[i];
-            const d = result.t1.dir[i];
-            up.push(v !== undefined && d === 'UP' ? { time: t, value: v } : { time: t });
-            down.push(v !== undefined && d === 'DOWN' ? { time: t, value: v } : { time: t });
-        }
+        const split = splitTrendLines(view.map((b) => b.time), result.t1.line.slice(from), result.t1.dir.slice(from));
+        const asLine = (pts: typeof split.up) => pts.map((p) => (p.value === undefined ? { time: p.time as UTCTimestamp }
+            : p.color !== undefined ? { time: p.time as UTCTimestamp, value: p.value, color: p.color } : { time: p.time as UTCTimestamp, value: p.value }));
+        const up = asLine(split.up);
+        const down = asLine(split.down);
         upRef.current?.setData(up);
         downRef.current?.setData(down);
         const first = view[0]?.time ?? Infinity;

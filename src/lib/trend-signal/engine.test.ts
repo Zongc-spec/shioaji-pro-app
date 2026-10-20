@@ -7,7 +7,7 @@ import { DEFAULT_CONFIG } from './config';
 import { firstAfter, lastAtOrBefore } from './core/bars';
 import { runTrendSignal } from './engine';
 import { sessionLabels, walkBars } from './fixtures.test-harness';
-import { chartBucket, projectLines, projectMarkers } from './project';
+import { chartBucket, GAP_COLOR, projectLines, projectMarkers, splitTrendLines } from './project';
 import type { TrendSignal, TrendSignalConfig, TrendSignalInput, TrendSignalResult } from './types';
 
 const labels = sessionLabels('2026-09-01', 4);
@@ -114,6 +114,30 @@ describe('A8 週期切換不漂移', () => {
             if (j >= 0) expect(full.m5.bars[j]!.time).toBeLessThanOrEqual(b.time);
             expect(l1.up[i]!.value ?? l1.down[i]!.value).toBe(j >= 0 ? full.t5.line[j] : undefined);
         });
+    });
+});
+
+describe('趨勢線斷線（lightweight-charts 折線不因 whitespace 斷開）', () => {
+    it('看得見的線段兩端都在同一段同方向區間：翻轉時不畫連接線', () => {
+        const times = full.m5.bars.map((b) => b.time);
+        const { up, down } = splitTrendLines(times, full.t5.line, full.t5.dir);
+        let visible = 0;
+        for (let i = 0; i + 1 < times.length; i++) {
+            if (up[i]!.value !== undefined && up[i]!.color === undefined) {
+                visible++;
+                expect([full.t5.dir[i], full.t5.dir[i + 1]]).toEqual(['UP', 'UP']);
+            }
+            if (down[i]!.value !== undefined && down[i]!.color === undefined) {
+                expect([full.t5.dir[i], full.t5.dir[i + 1]]).toEqual(['DOWN', 'DOWN']);
+            }
+        }
+        expect(visible).toBeGreaterThan(100);
+    });
+    it('非生效側與每段最後一點透明，點值就是當下的趨勢線', () => {
+        const { up, down } = splitTrendLines([1, 2, 3, 4], [10, 11, 20, 19], ['UP', 'UP', 'DOWN', 'DOWN']);
+        expect(up).toEqual([{ time: 1, value: 10 }, { time: 2, value: 11, color: GAP_COLOR }, { time: 3, value: 20, color: GAP_COLOR }, { time: 4, value: 19, color: GAP_COLOR }]);
+        expect(down).toEqual([{ time: 1, value: 10, color: GAP_COLOR }, { time: 2, value: 11, color: GAP_COLOR }, { time: 3, value: 20 }, { time: 4, value: 19 }]);
+        expect(splitTrendLines([1], [undefined], ['UNKNOWN']).up).toEqual([{ time: 1 }]);
     });
 });
 

@@ -111,7 +111,7 @@ describe('Trend Signal Pro 原生指標', () => {
         await flush();
         // canonical 歷史固定 20 個日曆日（台灣日期 2026-09-04 往前 20 天），與主圖週期無關
         expect(fetchMock.mock.calls.some((c) => c[1] === '2026-08-15' && c[2] === '2026-09-04')).toBe(true);
-        expect(hasText(r, 'Trend Signal Pro · SuperTrend')).toBe(true);
+        expect(hasText(r, 'TSP · SuperTrend')).toBe(true);
         expect(hasText(r, '5m 主控')).toBe(true);
         expect(hasText(r, '虛擬風控 · TMFR1')).toBe(true);
         expect(hasText(r, '只觀察，不送任何委託')).toBe(true);
@@ -152,7 +152,7 @@ describe('Trend Signal Pro 原生指標', () => {
         localStorage.setItem('sj-pro-indicators-v2', JSON.stringify([{ ...newInstance(TSP_TYPE), hidden: true }]));
         const r = mount({ contract: fut });
         await flush();
-        expect(hasText(r, 'Trend Signal Pro · ')).toBe(false);
+        expect(hasText(r, 'TSP · ')).toBe(false);
         expect(lastSignalMarkers()).toEqual([]);
     });
 

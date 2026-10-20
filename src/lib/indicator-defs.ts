@@ -222,8 +222,8 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
         category: 'overlay',
         params: TSP_PARAMS,
         outputs: [
-            { key: 'up', label: '5m 多頭趨勢線', kind: 'line', color: '#1fd286', width: 2, plot: 'step' },
-            { key: 'down', label: '5m 空頭趨勢線', kind: 'line', color: '#ff4d6a', width: 2, plot: 'step' },
+            { key: 'up', label: '5m 多頭趨勢線', kind: 'line', color: '#1fd286', width: 2 },
+            { key: 'down', label: '5m 空頭趨勢線', kind: 'line', color: '#ff4d6a', width: 2 },
             { key: 'ema', label: '5m EMA（註記）', kind: 'dashed', color: '#8b94a7' },
         ],
         labelFor: tspLabel,

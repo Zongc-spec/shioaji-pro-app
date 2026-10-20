@@ -7,6 +7,8 @@ import type { Candle } from './types/market';
 export interface IndicatorPoint {
     time: number;
     value?: number;
+    /** 此點起到下一點的線段顏色（例：transparent 讓折線在此斷開）；缺省用輸出樣式 */
+    color?: string;
 }
 
 const tp = (b: Candle) => (b.high + b.low + b.close) / 3;
