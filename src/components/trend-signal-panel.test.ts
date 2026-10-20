@@ -10,7 +10,7 @@ vi.hoisted(() => {
 import { DEFAULT_CONFIG } from '../lib/trend-signal/config';
 import { runTrendSignal } from '../lib/trend-signal/engine';
 import { sessionLabels, walkBars } from '../lib/trend-signal/fixtures.test-harness';
-import { auditExport, pendingAlerts } from './trend-signal-panel';
+import { auditExport, feedBadge, pendingAlerts } from './trend-signal-panel';
 
 const labels = sessionLabels('2026-09-01', 3);
 const m1 = walkBars(labels, 5, { regime: 60 });
@@ -39,5 +39,16 @@ describe('審計匯出', () => {
         expect(out.signals).toHaveLength(res.signals.length);
         expect(out.entries).toHaveLength(res.entries.length);
         expect(out.events[0]).toHaveProperty('at');
+    });
+});
+
+describe('行情狀態徽章', () => {
+    const feed = (over: Partial<typeof res>, stream: 'live' | 'down' = 'live') => ({ result: { ...res, ...over }, stream, loading: false, error: false });
+    it('LIVE、未連線、休市、延遲與國定假日（盤中時段長時間無資料）', () => {
+        expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 30 })).text).toBe('LIVE');
+        expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 30 }, 'down')).cls).toBe('down');
+        expect(feedBadge(feed({ sessionOpen: false })).text).toBe('休市');
+        expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 400 })).text).toBe('資料延遲 400 秒');
+        expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 90000 })).text).toBe('無新資料（可能休市）');
     });
 });

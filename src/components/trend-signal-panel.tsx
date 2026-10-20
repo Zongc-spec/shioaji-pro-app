@@ -142,12 +142,14 @@ const ALGO_TEXT = { supertrend: 'SuperTrend', donchian: 'Donchian', kama: 'KAMA'
 const num = (v: number | undefined, d = 2) => (v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
 const hm = (t: number | null | undefined) => (t === null || t === undefined ? '—' : wallHm(t));
 
-function feedBadge(feed: TrendSignalFeed): { cls: keyof typeof s.badge; text: string } {
+export function feedBadge(feed: TrendSignalFeed): { cls: keyof typeof s.badge; text: string } {
     const res = feed.result;
     if (feed.error && !res) return { cls: 'down', text: 'K 線歷史無法取得' };
     if (!res) return { cls: 'idle', text: feed.loading ? '載入 20 天 1m…' : '等待資料' };
     if (feed.stream !== 'live') return { cls: 'down', text: `行情未連線（${feed.stream}）— 訊號不可交易` };
     if (!res.sessionOpen) return { cls: 'idle', text: '休市' };
+    // 時段判定不知道國定假日：盤中時段超過 30 分鐘沒有任何已收 1m，多半是休市
+    if (res.dataLagSec !== null && res.dataLagSec > 1800) return { cls: 'idle', text: '無新資料（可能休市）' };
     if (res.dataLagSec !== null && res.dataLagSec > 180) return { cls: 'warn', text: `資料延遲 ${Math.round(res.dataLagSec)} 秒` };
     return { cls: 'live', text: 'LIVE' };
 }

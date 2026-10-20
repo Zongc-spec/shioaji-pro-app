@@ -101,7 +101,7 @@ BUY/SELL，避免資料起點造成假訊號。
 
 | 項目 | 結果 |
 |---|---|
-| 單元／整合測試 | `npm test`：232 files passed／1 skipped；3585 tests passed／2 skipped（新增 135 個） |
+| 單元／整合測試 | `npm test`：232 files passed／1 skipped；3586 tests passed／2 skipped（新增 136 個） |
 | 型別檢查與建置 | `npm run build`（`tsc -b` + `vite build`）通過 |
 | 真實資料回放 | 3 演算法 × 2 期間 × 886 步，0 不一致（量測報告結果 5） |
 | 起點不變性 | 373 個起點，暖身後方向與線值一致（量測報告結果 3） |
