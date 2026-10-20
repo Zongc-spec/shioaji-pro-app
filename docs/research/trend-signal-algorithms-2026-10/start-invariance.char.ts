@@ -1,15 +1,26 @@
-// 起點不變性（研究量測，不在 CI 執行）：從 373 個不同起點各取 3000 根 5m 計算 SuperTrend，
-// 量測方向與線值（差 > 0.5 點）最晚在起點後第幾根才與全量計算永久一致 → 決定暖身長度。
+// 起點不變性（研究量測，不在 CI 執行）：從 373 個不同起點各取 3000 根 5m，以
+// src/lib/trend-signal/trend/algorithms.ts 的實作計算，量測方向與線值（差 > 0.5 點）
+// 最晚在起點後第幾根才與全量計算永久一致 → 決定各演算法的暖身長度。
+// 只比較兩邊都已有方向的 K 棒；另記錄子序列仍無方向、全量已有方向的最後一根。
 // 用法同 characterize.char.ts（TSP_CHAR_CSV / TSP_CHAR_OUT）。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { supertrend } from '../../../src/lib/indicators';
 import { aggregate, wallClockToUtc } from '../../../src/lib/utils/kbars';
+import { ALGORITHMS } from '../../../src/lib/trend-signal/trend/algorithms';
+import { DEFAULT_CONFIG } from '../../../src/lib/trend-signal/config';
+import type { TrendParams } from '../../../src/lib/trend-signal/types';
 import type { Candle } from '../../../src/lib/types/market';
 
 const CSV = process.env.TSP_CHAR_CSV ?? '';
 const OUT = `${process.env.TSP_CHAR_OUT ?? tmpdir()}/start-invariance.txt`;
+
+const pct = (xs: number[], q: number) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s.length ? s[Math.floor(q * (s.length - 1))]! : Number.NaN;
+};
+
 test('start invariance', () => {
+    if (!CSV) throw new Error('請以 TSP_CHAR_CSV 指定 1m CSV 路徑');
     const lines = readFileSync(CSV, 'utf8').split('\n');
     const m1: Candle[] = [];
     const FROM = wallClockToUtc('2025-09-01T00:00:00');
@@ -22,42 +33,43 @@ test('start invariance', () => {
         m1.push({ time: t, open: +o!, high: +h!, low: +lo!, close: +c!, volume: +v! });
     }
     const b5 = aggregate(m1, 5);
+    const base = DEFAULT_CONFIG.trend;
+    const cases: [string, TrendParams][] = [
+        ['SuperTrend(10,2)', { ...base, algo: 'supertrend', stMult: 2 }],
+        ['SuperTrend(10,3)', { ...base, algo: 'supertrend', stMult: 3 }],
+        ['SuperTrend(10,4)', { ...base, algo: 'supertrend', stMult: 4 }],
+        ['Donchian(20)', { ...base, algo: 'donchian' }],
+        ['KAMA(10,2,30)+0.3', { ...base, algo: 'kama' }],
+    ];
     const out: string[] = [];
-    for (const [p, mult] of [[10, 2], [10, 3], [10, 4]] as const) {
-        const full = supertrend(b5, p, mult);
-        const dirFull = b5.map((_, i) => (full.up[i]!.value !== undefined ? 1 : full.down[i]!.value !== undefined ? -1 : 0));
-        let starts = 0, ok = 0, firstMismatch: string[] = [], maxSettle = 0, maxLine = 0, maxLineFromStart = 0, maxFirst = 0, maxDirFromStart = 0; const dirLasts: number[] = []; const lineLasts: number[] = [];
-        // 每 137 根取一個起點（約 11 小時），涵蓋日夜盤各種位置
+    for (const [name, p] of cases) {
+        const algo = ALGORITHMS[p.algo];
+        const full = algo.compute(b5, p);
+        const dirLast: number[] = [];
+        const lineLast: number[] = [];
+        const unknownLast: number[] = [];
+        let starts = 0;
         for (let s = 137; s < b5.length - 3000; s += 137) {
             starts++;
-            const sub = b5.slice(s, s + 3000);
-            const r = supertrend(sub, p, mult);
-            const dir = sub.map((_, i) => (r.up[i]!.value !== undefined ? 1 : r.down[i]!.value !== undefined ? -1 : 0));
-            // 第一次切換（ATR 可用後）
-            let first = -1;
-            for (let i = 1; i < dir.length; i++) if (dir[i - 1] !== 0 && dir[i] !== 0 && dir[i] !== dir[i - 1]) { first = i; break; }
-            if (first < 0) continue;
-            // 第一次切換之後：方向與線值是否與全量計算相同
-            let dirLast = -1, lineLast = -1, dirDiffs = 0;
-            for (let i = 0; i < dir.length; i++) {
-                if (dir[i] === 0) continue;
-                const fv = full.up[s + i]!.value ?? full.down[s + i]!.value;
-                const sv = r.up[i]!.value ?? r.down[i]!.value;
-                if (dir[i] !== dirFull[s + i]) { dirLast = i; dirDiffs++; }
-                if (Math.abs((fv ?? 0) - (sv ?? 0)) > 0.5) lineLast = i;
+            const sub = algo.compute(b5.slice(s, s + 3000), p);
+            let dl = -1;
+            let ll = -1;
+            let ul = -1;
+            for (let i = 0; i < 3000; i++) {
+                const a = sub.dir[i]!;
+                const b = full.dir[s + i]!;
+                if (a === 0 && b !== 0) ul = i;
+                if (a === 0 || b === 0) continue;
+                if (a !== b) dl = i;
+                const sv = sub.line[i];
+                const fv = full.line[s + i];
+                if (sv !== undefined && fv !== undefined && Math.abs(sv - fv) > 0.5) ll = i;
             }
-            if (dirLast < 0) ok++;
-            else {
-                maxSettle = Math.max(maxSettle, dirLast - first);
-                if (firstMismatch.length < 3) firstMismatch.push(`start ${s} first-flip ${first} dir-diffs ${dirDiffs} last ${dirLast}`);
-            }
-            maxLine = Math.max(maxLine, lineLast < 0 ? 0 : lineLast - first);
-            maxLineFromStart = Math.max(maxLineFromStart, lineLast < 0 ? 0 : lineLast);
-            maxFirst = Math.max(maxFirst, first);
-            maxDirFromStart = Math.max(maxDirFromStart, dirLast);
-            dirLasts.push(dirLast); lineLasts.push(lineLast);
+            dirLast.push(dl);
+            lineLast.push(ll);
+            unknownLast.push(ul);
         }
-        out.push(`ST(${p},${mult}): starts=${starts} 方向在第一次切換後完全相同=${ok} (${(100 * ok / starts).toFixed(1)}%), 方向不同最多延續=${maxSettle} 根; 線值差>0.5點最多延續=${maxLine} 根(自起點 ${maxLineFromStart} 根); 第一次切換最晚=${maxFirst} 根; 自起點方向最後不同=${maxDirFromStart} 根; p99 方向=${[...dirLasts].sort((a,b)=>a-b)[Math.floor(0.99*(dirLasts.length-1))]} 線值=${[...lineLasts].sort((a,b)=>a-b)[Math.floor(0.99*(lineLasts.length-1))]}; ${firstMismatch.join(' | ')}`);
+        out.push(`${name}: starts=${starts} warmup=${algo.warmup(p)}; 方向最後不同 max=${Math.max(...dirLast)} p99=${pct(dirLast, 0.99)}; 線值差>0.5 max=${Math.max(...lineLast)} p99=${pct(lineLast, 0.99)}; 尚無方向 max=${Math.max(...unknownLast)}`);
     }
     writeFileSync(OUT, out.join('\n') + '\n');
 });

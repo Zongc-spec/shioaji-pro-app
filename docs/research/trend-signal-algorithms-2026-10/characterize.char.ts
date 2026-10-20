@@ -1,6 +1,6 @@
 // 一次性研究量測（不在 CI 執行）：在真實 TMF 1m 上量測候選趨勢演算法的
 // 訊號特性，以及 5m 趨勢切換後各種 1m 進場時機的差異。只量測指標行為，
-// 不含手續費、不模擬策略損益。量測當時的模組版本：commit d05e7e9。
+// 不含手續費、不模擬策略損益。初版量測於 commit d05e7e9；模組搬移後改用新路徑，結果逐欄相同。
 //
 //   D=docs/research/trend-signal-algorithms-2026-10
 //   TSP_CHAR_CSV=<datetime,open,high,low,close,volume 的 1m CSV> TSP_CHAR_OUT=<輸出目錄> \
@@ -9,14 +9,12 @@
 // CSV 的 datetime 為台灣時間的 1m 收盤 label（與 shioaji kbars 相同）。資料不進 repo。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { atr, ema, sar, stoch, supertrend, wma } from '../../../src/lib/indicators';
+import { atr, ema, sar, supertrend, wma } from '../../../src/lib/indicators';
 import { aggregate, wallClockToUtc } from '../../../src/lib/utils/kbars';
-import { tradingSessionOf } from '../../../src/lib/trend-signal/session';
-import { alignPoints, sessionVwap } from '../../../src/lib/trend-signal/bars';
-import { evalSetup } from '../../../src/lib/trend-signal/trigger';
-import { DEFAULT_CONFIG } from '../../../src/lib/trend-signal/config';
+import { tradingSessionOf } from '../../../src/lib/trend-signal/core/session';
+import { alignPoints } from '../../../src/lib/trend-signal/core/bars';
+import { evalSetup, kdIndicators } from '../../../src/lib/trend-signal/trigger/pullback-kd';
 import type { Candle } from '../../../src/lib/types/market';
-import type { M1Indicators } from '../../../src/lib/trend-signal/types';
 
 const CSV = process.env.TSP_CHAR_CSV ?? '';
 const OUT = process.env.TSP_CHAR_OUT ?? tmpdir();
@@ -389,17 +387,8 @@ test('trend algorithm + trigger timing characterization (TMF, read-only)', () =>
     }));
 
     // ---- 1m 進場時機（以 SuperTrend(10,3) 5m 切換為主訊號）----
-    const cfg = DEFAULT_CONFIG;
     const session1 = m1.map((x) => tradingSessionOf('FUT', x.time).key);
-    const kd = stoch(m1, cfg.kdPeriod, cfg.kdK, cfg.kdD);
-    const ind: M1Indicators = {
-        ema: alignPoints(m1, ema(m1, cfg.ema1m)),
-        atr: alignPoints(m1, atr(m1, cfg.atr1m)),
-        vwap: sessionVwap(m1, session1),
-        k: alignPoints(m1, kd.k),
-        d: alignPoints(m1, kd.d),
-        session: session1,
-    };
+    const ind = kdIndicators(m1, session1);
     const st1 = stDir(m1, 10, 3);
     const r5 = supertrend(b5, 10, 3);
     const line5 = b5.map((_, i) => r5.up[i]!.value ?? r5.down[i]!.value);
@@ -484,7 +473,7 @@ test('trend algorithm + trigger timing characterization (TMF, read-only)', () =>
                 if (n >= 0) at.set('T3 突破訊號 K', n);
             }
             if (!at.has('T4 EMA9/VWAP/KD')) {
-                const ev = evalSetup(m1, ind, m, e.d === 1 ? 'LONG' : 'SHORT', cfg);
+                const ev = evalSetup(m1, ind, m, e.d === 1 ? 'LONG' : 'SHORT');
                 if (ev.stage === 'READY' && !ev.chase) {
                     const n = entryAfter(m);
                     if (n >= 0) at.set('T4 EMA9/VWAP/KD', n);

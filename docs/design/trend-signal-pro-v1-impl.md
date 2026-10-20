@@ -82,8 +82,9 @@ BUY/SELL，避免資料起點造成假訊號。
 - P1 草稿完整保存為 `d05e7e9`，不刪除；盤點與分類見 [重設計提案](trend-signal-pro-v1-redesign.md) §2。
 - EMA9／VWAP／KD Trigger 停止擴充，保留為可選模式。
 - 以真實 TMF 資料量測候選演算法與 1m 進場時機：[量測報告](../research/trend-signal-algorithms-2026-10.md)。
-- 設計決策修正（確認後生效）：D1 視窗 10 天 → 20 天；D5 暖身改為 15 × ATR 週期（量測依據）；
-  D6 候選窗口不跨盤別，歸 Entry Trigger 模組；D7、D8 歸風控模組。
+- 使用者確認後（同日）：核心 SuperTrend 可切換 Donchian／KAMA；1m Trigger 為 IMMEDIATE（基準）、
+  MICRO_TREND、PRICE_STRUCTURE；EMA21 改註記。設計決策修正：D1 視窗 10 天 → 20 天；D5 暖身改為
+  依演算法的固定根數（實測）；D6 候選窗口不跨盤別，歸 Entry Trigger 模組；D7、D8 歸風控模組。
 
 既有測試觀察（不穩定測試，與本功能無關）：完整 `npm test` 偶發 1 個失敗，出現過兩個測試：
 `candle-chart-order.test.tsx`「refuses a pending chart order at dispatch after switch back changes」（1 次）與
@@ -101,8 +102,8 @@ BUY/SELL，避免資料起點造成假訊號。
 | 階段 | 狀態 | 證據 |
 |---|---|---|
 | P0 基線 | 完成 | 本文件 P0 節；`bee79e8` |
-| P1 Signal engine / MTF | **暫停：等待核心訊號設計確認** | 草稿 `d05e7e9`；提案與量測報告 |
-| P2 UI / Dashboard | 未開始 | — |
-| P3 Risk planner（虛擬） | 未開始（`risk.ts` 草稿已有） | — |
+| P1 Signal engine / MTF | 完成 | `e2762fc`：core／trend／trigger；121 個測試（A1–A10、必驗案例 1、2、4、5、6、靜態安全） |
+| P2 UI / Dashboard | 進行中 | — |
+| P3 Risk planner（虛擬） | 純計算完成 | `e2762fc`：risk/plan、risk/virtual；R 面板屬 P2 |
 | P4 模擬交易 adapter | **未授權，不實作** | — |
 | P5 Acceptance | 未開始 | — |
