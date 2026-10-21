@@ -1,5 +1,7 @@
 // App 自訂指標與 Web 共用 runTrendSignal；這裡只驗輸入、決定可見資料與投影。
 // App API 沒有商品/成交資訊：預設是明訂的微台設定，不是自動辨識。
+// App 單檔（tsp-chart-1.2.0）走 chart-custom.ts 的本圖模式，只用這裡的 normalizeCustomBars／projectCustomTsp；
+// computeCustomTsp 是 1m 主圖跑原 5m 趨勢＋1m 觸發模型的對照路徑（1.1.3 單檔即此模型），供測試對照 Web。
 import type { BarsInput, PlotHint } from '../custom-runtime';
 import { CLOSE_GRACE } from '../intraday-session';
 import type { Candle } from '../types/market';

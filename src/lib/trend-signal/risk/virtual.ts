@@ -291,7 +291,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                     }
                     trades.push(vt);
                     trade = vt;
-                    log(openTime(t), 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${when(t, 'open')}；${wallHm(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
+                    log(openTime(t), 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${when(t, 'open')}；${clockText(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
                     for (const w of vt.warnings) log(openTime(t), 'WARN', vt.id, w);
                 }
             }
@@ -300,7 +300,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
             trade.stop = pendingStop.stop;
             trade.stopKind = pendingStop.reason;
             trade.stopHistory.push({ time: t, stop: pendingStop.stop, reason: pendingStop.reason });
-            log(openTime(t), 'STOP_MOVE', trade.id, `${pendingStop.reason === 'breakeven' ? '保本' : '移動'}停損 → ${pendingStop.stop}（${wallHm(openTime(t))} 開盤起生效）`);
+            log(openTime(t), 'STOP_MOVE', trade.id, `${pendingStop.reason === 'breakeven' ? '保本' : '移動'}停損 → ${pendingStop.stop}（${clockText(openTime(t))} 開盤起生效）`);
             pendingStop = null;
         }
     };

@@ -12,6 +12,8 @@ export interface TickLike {
     time: number;
     price: number;
     volume: number;
+    /** 當日累計成交量（SSE total_volume）；有的話用來偵測中間漏收的成交 */
+    totalVolume?: number;
 }
 
 /** 把一筆成交併進尾段；回傳新陣列（不改寫輸入）。historyLast 是歷史的最後

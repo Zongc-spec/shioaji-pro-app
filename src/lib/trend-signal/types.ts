@@ -10,7 +10,9 @@ import type { Candle } from '../types/market';
 export type TrendState = 'LONG' | 'SHORT' | 'NEUTRAL' | 'UNKNOWN';
 export type Direction = 'LONG' | 'SHORT';
 export type Alignment = 'ALIGN' | 'DIVERGE' | 'NEUTRAL';
+/** 週期分鐘數：原生管線只有 1／5／15／60（NativeTf）；本圖模式另有任意分鐘與 1440（日K） */
 export type TfMinutes = number;
+export type NativeTf = 1 | 5 | 15 | 60;
 export type TrendAlgoId = 'supertrend' | 'donchian' | 'kama';
 export type EntryMode = 'IMMEDIATE' | 'MICRO_TREND' | 'PRICE_STRUCTURE' | 'PULLBACK_KD';
 

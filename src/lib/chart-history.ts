@@ -32,3 +32,10 @@ export function fetchChartHistoryStamped(contract: ContractBase, start: string, 
     const entry = request(contract, start, end, opts);
     return entry.promise.then((kbars) => ({ kbars, requestedAt: entry.at }));
 }
+
+/** A one-off fetch outside the shared cache, stamped with its send time. For repeated
+ * gap-filling requests: they must not evict the charts' cached histories. */
+export function fetchChartHistoryFresh(contract: ContractBase, start: string, end: string, opts?: { timeoutMs?: number }) {
+    const requestedAt = Date.now();
+    return fetchKbars(contract, start, end, opts).then((kbars) => ({ kbars, requestedAt }));
+}

@@ -321,6 +321,9 @@ export function TrendSignalPanel({
                             {feed.lateTicks > 0 && (
                                 <div className={s.note}>已忽略 {feed.lateTicks} 筆晚到成交：所屬分鐘已確認，不改寫已收 K 棒</div>
                             )}
+                            {feed.streamGaps > 0 && (
+                                <div className={s.note}>逐筆有 {feed.streamGaps} 次中間漏收（累計成交量對不上）：漏收前後的分鐘改以伺服器歷史確認</div>
+                            )}
                         </>
                     )}
                     <div className={s.note}>5m BUY／SELL＝主趨勢切換；1m ENTRY＝5m 方向內的執行候選（不是委託）。★ 為虛擬風控採用的模式。自行設計的公開演算法，非 Universal Indicator／Ultimate AI 原版，未驗證優於原版。</div>

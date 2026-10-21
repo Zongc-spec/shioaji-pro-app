@@ -25,3 +25,4 @@ export function fetchChartHistoryStamped(): Promise<{ kbars: KBars; requestedAt:
     const requestedAt = Date.now();
     return fetchChartHistory().then((kbars) => ({ kbars, requestedAt }));
 }
+export const fetchChartHistoryFresh = fetchChartHistoryStamped;

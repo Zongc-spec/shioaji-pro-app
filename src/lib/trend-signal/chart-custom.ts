@@ -98,7 +98,9 @@ export function runChartSignal(frame: ReturnType<typeof frameFromChart>) {
         m5: series, t5: track, signals, invalidations, entries: timing.entries.filter((e) => e.mode === cfg.entry.mode),
         cfg: cfg.risk, tick: frame.tick, pointValue: frame.pointValue, taxRate: frame.taxRate, key: `${key}|${riskKey(cfg)}`, clock: frame.clock });
     const events: AuditEvent[] = signals.map((s) => ({ time: s.barTime, kind: 'SIGNAL', ref: s.id, text: `本圖 ${label} ${s.kind} @ ${s.close}` }));
-    events.push(...v.events.map((e) => ({ ...e, text: e.text.replace(/\b[15]m\b/g, label) })));
+    // 共用的提示與風控文字以原模型的 1m／5m 命名；本圖模式兩者都是主圖週期（只改完整的 1m／5m 字樣，15m、60m 不受影響）
+    // 不用 lookbehind：舊版 Safari／WKWebView（macOS App）不支援，整個自訂指標會編譯失敗
+    events.push(...v.events.map((e) => ({ ...e, text: e.text.replace(/(^|[^0-9])[15]m(?![0-9A-Za-z])/g, (_, before: string) => `${before}${label}`) })));
     events.sort((a, b) => a.time - b.time);
     return { version: CHART_TSP_VERSION, timeframeMinutes: frame.minutes, timeframeLabel: label, asOf,
         m1: series, m5: series, t5: track, signals, invalidations, entries: timing.entries,

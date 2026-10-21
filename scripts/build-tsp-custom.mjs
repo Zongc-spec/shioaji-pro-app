@@ -34,7 +34,9 @@ export async function buildCustomSource() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     const source = await buildCustomSource();
     if (process.argv.includes('--check')) {
-        if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== source) {
+        // Windows checkout（core.autocrlf）會把產物換成 CRLF：只比對內容，不比對換行字元
+        const onDisk = fs.existsSync(target) ? fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n') : null;
+        if (onDisk !== source) {
             console.error('自訂腳本落後共用核心；請執行 npm run build:tsp-custom');
             process.exitCode = 1;
         } else console.log('自訂腳本與共用核心一致');

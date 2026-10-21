@@ -4,7 +4,7 @@
 //   2. 1m 提示（V1.1：產生即定案）之後不變，也不會事後補出更早的提示
 //   3. 已發生的虛擬成交、出場與停損變更之後不變
 //   4. 注入極端的進行中 K 棒：訊號與提示不受影響
-//   5. 即時資料路徑（第二個 test，輸出 replay-live-feed.txt）：逐筆成交、心跳、晚到成交、斷線與補抓都經過
+//   5. 即時資料路徑（第二個 test，輸出 replay-live-feed.txt）：逐筆成交（帶累計量）、晚到成交、斷線與補抓都經過
 //      App 同一個 LiveFeed，比對每次重算的已確認事件之後不變
 // 三種核心演算法各跑兩段期間。用法同 characterize.char.ts（TSP_CHAR_CSV / TSP_CHAR_OUT）。
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -91,8 +91,8 @@ function ticksOf(b: Candle): TickLike[] {
 }
 
 // 即時資料路徑（審查 P1：晚到成交改寫已收 K 棒）：以真實 1m 產生逐筆成交，經 core/feed.ts 的
-// LiveFeed（與 App 同一條路徑）組出 1m；每 30 秒一次心跳、約 8% 的分鐘有一筆晚到 3–40 秒的
-// 同分鐘成交（±10 點）、每段期間第一個日盤 10:12–10:17 斷線（重連後依需要補抓近兩天歷史）。
+// LiveFeed（與 App 同一條路徑）組出 1m；逐筆帶當日累計量（tsp-1.1.3 起心跳不推進確認）、約 8% 的分鐘有一筆
+// 晚到 3–40 秒的同分鐘成交（±10 點）、每段期間第一個日盤 10:12–10:17 斷線（重連後依需要補抓近兩天歷史）。
 // 每 3 分鐘重算，比對每一次的已確認事件（barTime ≤ 該次 asOf）在之後每一次都逐欄相同。
 test('live feed replay', () => {
     if (!CSV) throw new Error('請以 TSP_CHAR_CSV 指定 1m CSV 路徑');
@@ -114,23 +114,22 @@ test('live feed replay', () => {
             const outage = [wallClockToUtc(`${a.slice(0, 10)}T10:12:20`), wallClockToUtc(`${a.slice(0, 10)}T10:17:40`)];
             let seed = 12345;
             const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
-            type Ev = { t: number; kind: 'tick'; tick: TickLike } | { t: number; kind: 'hb' } | { t: number; kind: 'compute' };
+            type Ev = { t: number; kind: 'tick'; tick: TickLike } | { t: number; kind: 'compute' };
             const evs: Ev[] = [];
+            let cum = 0;
             for (const bar of bars) {
                 if (bar.time <= from) continue;
-                for (const tick of ticksOf(bar)) evs.push({ t: tick.time, kind: 'tick', tick });
+                for (const tick of ticksOf(bar)) evs.push({ t: tick.time, kind: 'tick', tick: { ...tick, totalVolume: (cum += tick.volume) } });
                 if (rnd() < 0.08) evs.push({ t: bar.time + 3 + Math.floor(rnd() * 37), kind: 'tick', tick: { time: bar.time - 2, price: bar.close + (rnd() < 0.5 ? -10 : 10), volume: 1 } });
             }
-            for (let t = from; t <= to + 60; t += 30) evs.push({ t, kind: 'hb' });
             for (let t = from; t <= to; t += STEP) evs.push({ t: t + 7, kind: 'compute' });
             evs.sort((x, y) => x.t - y.t || (x.kind === 'compute' ? 1 : 0) - (y.kind === 'compute' ? 1 : 0));
             const feed = new LiveFeed('FUT');
             let epoch = 1;
             let down = false;
-            let lastHb: number | null = null;
             let patchAt = -Infinity;
             let patches = 0;
-            feed.observe(epoch, null, from - 120);
+            feed.observe(epoch, from - 120);
             feed.setHistory(bars.filter((x) => x.time <= from), from + 10);
             const results: TrendSignalResult[] = [];
             for (const ev of evs) {
@@ -139,9 +138,8 @@ test('live feed replay', () => {
                 down = nowDown;
                 if (down) continue;
                 if (ev.kind === 'tick') feed.onTick(ev.tick, epoch, ev.t);
-                else if (ev.kind === 'hb') lastHb = ev.t;
                 else {
-                    feed.observe(epoch, lastHb, ev.t);
+                    feed.observe(epoch, ev.t);
                     let s = feed.snapshot(ev.t);
                     if (s.historyWantedAt !== null && ev.t >= s.historyWantedAt && ev.t - patchAt >= 15) {
                         patchAt = ev.t;

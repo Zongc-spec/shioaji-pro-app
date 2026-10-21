@@ -53,7 +53,7 @@ describe('審計匯出', () => {
 });
 
 describe('行情狀態徽章', () => {
-    const feed = (over: Partial<typeof res>, stream: 'live' | 'down' = 'live') => ({ result: { ...res, ...over }, stream, loading: false, error: false, pendingFrom: null, confirmLagSec: 0, lateTicks: 0 });
+    const feed = (over: Partial<typeof res>, stream: 'live' | 'down' = 'live') => ({ result: { ...res, ...over }, stream, loading: false, error: false, pendingFrom: null, confirmLagSec: 0, lateTicks: 0, streamGaps: 0 });
     it('LIVE、未連線、休市、延遲與國定假日（盤中時段長時間無資料）', () => {
         expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 30 })).text).toBe('LIVE');
         expect(feedBadge(feed({ sessionOpen: true, dataLagSec: 30 }, 'down')).cls).toBe('down');

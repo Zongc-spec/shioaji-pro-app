@@ -35,6 +35,18 @@ describe('chart history request sharing', () => {
         expect(mocks.fetch).toHaveBeenCalledOnce();
         vi.useRealTimers();
     });
+    it('fresh gap-filling requests bypass the shared cache: always refetch, never evict cached histories', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(2_000_000);
+        const { fetchChartHistory, fetchChartHistoryFresh } = await import('./chart-history');
+        await fetchChartHistory(contract, '2026-09-01', '2026-09-12');
+        for (let i = 0; i < 150; i++) await fetchChartHistoryFresh(contract, '2026-09-11', '2026-09-12');
+        expect(mocks.fetch).toHaveBeenCalledTimes(151);
+        await fetchChartHistory(contract, '2026-09-01', '2026-09-12');
+        expect(mocks.fetch).toHaveBeenCalledTimes(151);
+        expect(await fetchChartHistoryFresh(contract, '2026-09-11', '2026-09-12')).toEqual({ kbars: { Close: [100] }, requestedAt: 2_000_000 });
+        vi.useRealTimers();
+    });
     it('caches failures but allows an explicit manual revision, date or server change', async () => {
         const { fetchChartHistory } = await import('./chart-history');
         mocks.fetch.mockRejectedValueOnce(new Error('offline'));

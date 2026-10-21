@@ -1022,7 +1022,7 @@
 						if (plan.overBudget) vt.warnings.push(`成交價重新定價後預估風險 NT$${Math.round(plan.totalRisk)} 超過預算 NT$${cfg.budget}`);
 						trades.push(vt);
 						trade = vt;
-						log(openTime(t), "FILL", vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${when(t, "open")}；${wallHm(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
+						log(openTime(t), "FILL", vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${when(t, "open")}；${clockText(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
 						for (const w of vt.warnings) log(openTime(t), "WARN", vt.id, w);
 					}
 				}
@@ -1035,7 +1035,7 @@
 					stop: pendingStop.stop,
 					reason: pendingStop.reason
 				});
-				log(openTime(t), "STOP_MOVE", trade.id, `${pendingStop.reason === "breakeven" ? "保本" : "移動"}停損 → ${pendingStop.stop}（${wallHm(openTime(t))} 開盤起生效）`);
+				log(openTime(t), "STOP_MOVE", trade.id, `${pendingStop.reason === "breakeven" ? "保本" : "移動"}停損 → ${pendingStop.stop}（${clockText(openTime(t))} 開盤起生效）`);
 				pendingStop = null;
 			}
 		};
@@ -1903,7 +1903,7 @@
 		}));
 		events.push(...v.events.map((e) => ({
 			...e,
-			text: e.text.replace(/\b[15]m\b/g, label)
+			text: e.text.replace(/(^|[^0-9])[15]m(?![0-9A-Za-z])/g, (_, before) => `${before}${label}`)
 		})));
 		events.sort((a, b) => a.time - b.time);
 		return {

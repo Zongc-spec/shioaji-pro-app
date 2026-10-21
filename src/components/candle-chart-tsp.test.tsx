@@ -28,6 +28,7 @@ const fetchMock = vi.fn();
 vi.mock('../lib/chart-history', () => ({
     fetchChartHistory: (...a: unknown[]) => fetchMock(...a),
     fetchChartHistoryStamped: (...a: unknown[]) => fetchMock(...a).then((kbars: unknown) => ({ kbars, requestedAt: Date.now() })),
+    fetchChartHistoryFresh: (...a: unknown[]) => fetchMock(...a).then((kbars: unknown) => ({ kbars, requestedAt: Date.now() })),
     nextChartHistoryRevision: () => Math.random(),
 }));
 

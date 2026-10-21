@@ -3,7 +3,8 @@
 //   - 伺服器歷史：原始請求時刻 − 10 秒以前的分鐘以伺服器為準（共用快取時用當初的請求時刻）
 //   - 逐筆成交：連續接收期間，從接收起點到最後一筆成交的交易所時間為止都已收到
 //     心跳只有本機接收時間，不能證明尚在佇列中的行情已送達；安靜市場改由歷史補抓確認
-//   - 斷線重連或暫停接收：逐筆涵蓋重新起算；缺口與兩端只收到部分成交的分鐘
+//   - 斷線重連、暫停接收，或累計成交量（total_volume）對不上（SSE 沒斷但中間有成交沒收到，
+//     例如上游斷線、訂閱被丟）：逐筆涵蓋重新起算；缺口與兩端只收到部分成交的分鐘
 //     都要等重抓的伺服器歷史涵蓋後才能確認，期間 asOf 不前進
 // 一旦確認（commit）就凍結：之後晚到的成交、重抓的歷史都不再改寫已確認的分鐘，
 // 已出現的訊號因此不會因資料更新而改變。
@@ -32,6 +33,8 @@ export interface FeedSnapshot {
     historyWantedAt: number | null;
     /** 因所屬分鐘已確認（或比尾段更舊）而忽略的成交筆數 */
     lateTicks: number;
+    /** 累計成交量對不上（中間有成交沒收到）而重新起算逐筆涵蓋的次數 */
+    streamGaps: number;
 }
 
 export class LiveFeed {
@@ -45,16 +48,22 @@ export class LiveFeed {
     /** 本次連線的逐筆涵蓋區間 [coverFrom, alive] */
     private coverFrom = Number.POSITIVE_INFINITY;
     private alive = Number.NEGATIVE_INFINITY;
+    /** 本次接收的上一筆累計成交量；null＝剛起算或沒有累計量可比 */
+    private lastTotal: number | null = null;
+    /** 剛起算、還沒收到第一筆成交：起點以本機時鐘估計，本機時鐘偏慢時會早於實際開始接收的時刻 */
+    private awaitingFirst = true;
+    private gaps = 0;
 
     constructor(private readonly secType: SecurityType) {}
 
-    /** epoch 改變＝曾斷線重連，逐筆涵蓋從 now 重新起算。
-     *  heartbeatAt 保留舊呼叫介面，但接收時間不是行情水位，不能推進確認。 */
-    observe(epoch: number, _heartbeatAt: number | null, now: number): void {
+    /** epoch 改變＝曾斷線重連，逐筆涵蓋從 now 重新起算。心跳只代表連線活著，不推進確認。 */
+    observe(epoch: number, now: number): void {
         if (this.epoch !== epoch) {
             this.epoch = epoch;
             this.coverFrom = now;
             this.alive = now;
+            this.lastTotal = null;
+            this.awaitingFirst = true;
         }
     }
 
@@ -64,13 +73,31 @@ export class LiveFeed {
         this.epoch = null;
         this.coverFrom = Number.POSITIVE_INFINITY;
         this.alive = Number.NEGATIVE_INFINITY;
+        this.lastTotal = null;
+        this.awaitingFirst = true;
     }
 
     /** 一筆成交。所屬分鐘已確認（或比尾段最後一根更舊）就忽略並計數，不改寫已收 K 棒。 */
     onTick(tick: TickLike, epoch: number, now: number): void {
-        this.observe(epoch, null, now);
+        this.observe(epoch, now);
+        // 起算後的第一筆：實際開始接收的時刻不早於它的交易所時間（本機時鐘偏慢也不會把更早的分鐘算進來）
+        if (this.awaitingFirst) {
+            this.awaitingFirst = false;
+            this.coverFrom = Math.max(this.coverFrom, tick.time);
+        }
+        // 累計量應恰好多出這一筆的量；對不上＝中間有成交沒收到：從這一筆重新起算，缺口等歷史補齊
+        const total = tick.totalVolume;
+        if (total !== undefined && Number.isFinite(total)) {
+            if (this.lastTotal !== null && total !== this.lastTotal + tick.volume) {
+                this.gaps++;
+                this.coverFrom = Math.max(tick.time, this.alive);
+                this.alive = tick.time;
+            }
+            this.lastTotal = total;
+        }
         const label = Math.floor(tick.time / 60) * 60 + 60;
-        if (label <= this.frozenThrough) {
+        // 已確認，或伺服器歷史已涵蓋的分鐘：以既有資料為準（不再併入，避免同一筆成交重複計量）
+        if (label <= this.frozenThrough || label <= this.historyAsOf) {
             this.late++;
             return;
         }
@@ -86,6 +113,8 @@ export class LiveFeed {
     /** 伺服器 1m 歷史。requestedAt：這份資料的原始請求時刻（牆鐘秒）。patch：只涵蓋近期，
      *  取代該範圍起點以後的歷史。已確認的分鐘一律以凍結版本為準。 */
     setHistory(bars: Candle[], requestedAt: number, patch = false): void {
+        // 空回應不能證明「這段沒有成交」：不推進涵蓋，也不清掉既有歷史
+        if (bars.length === 0) return;
         const coveredThrough = requestedAt - FEED_GRACE_SEC;
         // full refresh 與 patch 可反向完成；舊 payload 不能沿用較新的涵蓋水位。
         if (coveredThrough < this.historyAsOf) return;
@@ -115,7 +144,7 @@ export class LiveFeed {
         const horizon = Math.max(this.historyAsOf, this.alive);
         let asOf = Math.max(this.frozenThrough, this.historyAsOf);
         // 商品切換時 React 當輪 effect 可能仍有舊 historyVer；新 feed 尚無歷史不能從 −Infinity 掃描。
-        if (!Number.isFinite(asOf)) return { bars, asOf, live: null, pendingFrom: null, historyWantedAt: null, lateTicks: this.late };
+        if (!Number.isFinite(asOf)) return { bars, asOf, live: null, pendingFrom: null, historyWantedAt: null, lateTicks: this.late, streamGaps: this.gaps };
         let pendingFrom: number | null = null;
         for (let label = Math.floor(asOf / 60) * 60 + 60; label <= Math.floor(horizon / 60) * 60; label += 60) {
             if (isRegularMinute(this.secType, label) && !this.tickCovered(label)) {
@@ -141,7 +170,7 @@ export class LiveFeed {
         const last = bars[bars.length - 1];
         const current = !!last && last.time >= now - FEED_GRACE_SEC;
         const live = last && current && last.time > asOf && (pendingFrom === null || pendingFrom >= last.time) ? last : null;
-        return { bars, asOf, live, pendingFrom, historyWantedAt, lateTicks: this.late };
+        return { bars, asOf, live, pendingFrom, historyWantedAt, lateTicks: this.late, streamGaps: this.gaps };
     }
 
     /** 計算用過 asOf 之後呼叫：label ≤ asOf 的分鐘凍結，之後不再改變 */

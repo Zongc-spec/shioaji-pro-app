@@ -9,7 +9,7 @@ import type { SecurityType } from '../../types/contract';
 import type { Candle } from '../../types/market';
 import { aggregate } from '../../utils/kbars';
 import { isRegularMinute, tradingSessionOf, type TradingSession } from './session';
-import type { DataGap, TfMinutes, TfSeries } from '../types';
+import type { DataGap, NativeTf, TfSeries } from '../types';
 
 /** label ≤ asOf 的 1m K 棒才算已收。回傳新陣列：未排序或 label 重複
  *  （後者覆蓋前者）的輸入先正規化。 */
@@ -38,7 +38,7 @@ function normalize(bars: Candle[]): Candle[] {
  *  （完整性；用 completeOnly() 排除不完整的桶）。 */
 export function buildTf(
     m1: Candle[],
-    tf: TfMinutes,
+    tf: NativeTf,
     secType: SecurityType,
     asOf: number,
 ): TfSeries {
@@ -114,7 +114,7 @@ export function completeOnly(s: TfSeries): { series: TfSeries; gaps: DataGap[] }
 
 /** 每根 1m 所屬的 tf 桶，在它之前是否已缺正規交易分鐘（只看這根以前，因果）。
  *  1m 提示略過這些位置：桶內出現缺口後到該桶收盤都不提示，下一個桶再由 freshAt 判定過期。 */
-export function holeBefore(m1: Candle[], secType: SecurityType, tf: TfMinutes = 5): boolean[] {
+export function holeBefore(m1: Candle[], secType: SecurityType, tf: NativeTf = 5): boolean[] {
     const sec = tf * 60;
     const out: boolean[] = [];
     let cur = Number.NaN;

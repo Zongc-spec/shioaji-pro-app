@@ -1,14 +1,15 @@
 // src/hooks/use-trend-signal.ts — Trend Signal Pro 的資料來源：固定 20 天的 1m 歷史
 // （chart-history 快取，與主圖同一條 kbars 路徑）＋ SSE 逐筆成交組即時 1m。
 // 「已收」由 core/feed.ts 依資料涵蓋判定（伺服器歷史的原始請求時刻、連續接收期間的交易所成交時間），
-// 不靠牆鐘；斷線重連或缺分鐘時先補抓近兩天的歷史，涵蓋後才確認。已確認的分鐘凍結，
-// 晚到的成交與「更新歷史」都不改寫。只讀行情，不碰任何下單路徑。
+// 不靠牆鐘；斷線重連、累計成交量對不上或缺分鐘時，從第一個待補分鐘的前一天起補抓歷史（不進共用快取），
+// 涵蓋後才確認。已確認的分鐘凍結，晚到的成交與「更新歷史」都不改寫。只讀行情，不碰任何下單路徑。
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { fetchChartHistoryStamped, nextChartHistoryRevision } from '../lib/chart-history';
+import { fetchChartHistoryFresh, fetchChartHistoryStamped } from '../lib/chart-history';
 import { getStreamStatus, onAnyTick, streamConnectionEpoch, subscribeStatusStore, type StreamStatus } from '../lib/stream';
 import { configFromParams } from '../lib/trend-signal/config';
 import { LiveFeed } from '../lib/trend-signal/core/feed';
+import { wallDate } from '../lib/trend-signal/core/session';
 import { runTrendSignal } from '../lib/trend-signal/engine';
 import type { TrendSignalResult } from '../lib/trend-signal/types';
 import type { ContractBase, ContractInfo } from '../lib/types/contract';
@@ -34,14 +35,17 @@ export interface TrendSignalFeed {
     confirmLagSec: number;
     /** 所屬分鐘已確認而忽略的晚到成交筆數 */
     lateTicks: number;
+    /** 累計成交量對不上（中間有成交沒收到）而改等歷史補齊的次數 */
+    streamGaps: number;
 }
 
 interface FeedInfo {
     pendingFrom: number | null;
     confirmLagSec: number;
     lateTicks: number;
+    streamGaps: number;
 }
-const NO_INFO: FeedInfo = { pendingFrom: null, confirmLagSec: 0, lateTicks: 0 };
+const NO_INFO: FeedInfo = { pendingFrom: null, confirmLagSec: 0, lateTicks: 0, streamGaps: 0 };
 
 export function useTrendSignal(
     contract: ContractBase,
@@ -111,13 +115,13 @@ export function useTrendSignal(
     useEffect(() => {
         if (!enabled) return;
         const feed = getFeed();
-        feed.observe(streamConnectionEpoch(), null, nowWallClockUtc());
+        feed.observe(streamConnectionEpoch(), nowWallClockUtc());
         const unsubscribe = onAnyTick((tick) => {
             if (tick.code !== code || tick.simtrade || tick.intraday_odd) return;
             const time = wallClockToUtc(`${tick.date}T${tick.time}`);
             const price = Number(tick.close);
             if (!Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
-            feed.onTick({ time, price, volume: tick.volume }, streamConnectionEpoch(), nowWallClockUtc());
+            feed.onTick({ time, price, volume: tick.volume, totalVolume: tick.total_volume }, streamConnectionEpoch(), nowWallClockUtc());
             lastPriceRef.current = price;
             tickSeqRef.current += 1;
         });
@@ -136,15 +140,18 @@ export function useTrendSignal(
         const compute = () => {
             const feed = getFeed();
             const now = nowWallClockUtc();
-            feed.observe(streamConnectionEpoch(), null, now);
+            feed.observe(streamConnectionEpoch(), now);
             const s = feed.snapshot(now);
             if (!Number.isFinite(s.asOf)) return;
-            // 有分鐘等資料補齊：補抓近兩天的歷史（節流；失敗下一輪再試）
+            // 有分鐘等資料補齊：補抓歷史（節流；失敗下一輪再試）
             const patch = patchRef.current;
             if (s.historyWantedAt !== null && now >= s.historyWantedAt && !patch.inFlight && Date.now() - patch.at >= PATCH_MIN_INTERVAL_MS) {
                 const request = { inFlight: true, at: Date.now() };
                 patchRef.current = request;
-                fetchChartHistoryStamped(contract, dateStrOffset(1), dateStrOffset(0), { revision: nextChartHistoryRevision(), timeoutMs: 30_000 })
+                // 從第一個待補分鐘的前一天抓起：隱藏指標或斷線超過一天也補得回來（最多到 20 天歷史的起點）。
+                // 每次都是新請求、不進共用快取，安靜時段反覆補抓也不會擠掉主圖與 20 天歷史的快取
+                const from = Math.max((s.pendingFrom ?? now) - 86_400, now - TSP_HISTORY_DAYS * 86_400);
+                fetchChartHistoryFresh(contract, wallDate(from), dateStrOffset(0), { timeoutMs: 30_000 })
                     .then(({ kbars, requestedAt }) => {
                         // 同商品的 historyVer／參數重算不會取消仍有效的補抓；停用或換商品才撤銷 record。
                         if (patchRef.current === request) feed.setHistory(kbarsToCandles(kbars), msToWallClockUtc(requestedAt), true);
@@ -154,10 +161,10 @@ export function useTrendSignal(
                         if (patchRef.current === request) patchRef.current = { ...request, inFlight: false };
                     });
             }
-            const nextInfo: FeedInfo = { pendingFrom: s.pendingFrom, confirmLagSec: Math.max(0, now - s.asOf), lateTicks: s.lateTicks };
+            const nextInfo: FeedInfo = { pendingFrom: s.pendingFrom, confirmLagSec: Math.max(0, now - s.asOf), lateTicks: s.lateTicks, streamGaps: s.streamGaps };
             const pi = infoRef.current;
             // 落後秒數只在跨過徽章門檻（180 秒）附近才需要更新畫面
-            if (pi.pendingFrom !== nextInfo.pendingFrom || pi.lateTicks !== nextInfo.lateTicks || (pi.confirmLagSec > 180) !== (nextInfo.confirmLagSec > 180) || (nextInfo.confirmLagSec > 180 && Math.abs(pi.confirmLagSec - nextInfo.confirmLagSec) >= 10)) {
+            if (pi.pendingFrom !== nextInfo.pendingFrom || pi.lateTicks !== nextInfo.lateTicks || pi.streamGaps !== nextInfo.streamGaps || (pi.confirmLagSec > 180) !== (nextInfo.confirmLagSec > 180) || (nextInfo.confirmLagSec > 180 && Math.abs(pi.confirmLagSec - nextInfo.confirmLagSec) >= 10)) {
                 infoRef.current = nextInfo;
                 setInfo(nextInfo);
             }
@@ -206,5 +213,6 @@ export function useTrendSignal(
         pendingFrom: enabled ? info.pendingFrom : null,
         confirmLagSec: enabled ? info.confirmLagSec : 0,
         lateTicks: enabled ? info.lateTicks : 0,
+        streamGaps: enabled ? info.streamGaps : 0,
     };
 }

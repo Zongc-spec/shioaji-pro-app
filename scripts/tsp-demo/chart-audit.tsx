@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { computeChartCustomTsp } from '../../src/lib/trend-signal/chart-custom';
 import { runCustom, type BarsInput } from '../../src/lib/custom-runtime';
+import { exitText } from '../../src/lib/trend-signal/risk/virtual';
 import { aggregate, kbarsToCandles, nowWallClockUtc } from '../../src/lib/utils/kbars';
 import type { Candle } from '../../src/lib/types/market';
 import { fetchChartHistory } from './stubs/chart-history';
@@ -12,10 +13,6 @@ const price = (value: number | null | undefined) => value == null || !Number.isF
     ? '—' : value.toLocaleString('en-US', { maximumFractionDigits: 2 });
 const wallTime = (value: number | null | undefined) => value == null || !Number.isFinite(value)
     ? '—' : new Date(value * 1000).toISOString().slice(0, 16).replace('T', ' ');
-const exitText: Record<string, string> = {
-    STOP: '初始停損', TRAIL: '移動停損', BREAKEVEN: '保本停損', TP2R: '2R 出場', TP3R: '3R 出場',
-    REVERSAL: '反向趨勢', TREND_INVALID: '趨勢失效', SESSION_END: '時段結束',
-};
 
 interface Props {
     timeframe: string;
@@ -135,7 +132,7 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
             {audit && 'direct' in audit && audit.closed.map((trade) => <div key={trade.id} style={styles.card}>
                 <div style={styles.row}>
                     <span>{trade.direction === 'LONG' ? '多' : '空'} {trade.qty}口 · {wallTime(trade.fillAt)}</span>
-                    <strong>{exitText[trade.exitReason ?? ''] ?? trade.exitReason ?? '出場'}</strong>
+                    <strong>{trade.exitReason ? exitText(trade.exitReason).replace('5m', '本圖') : '出場'}</strong>
                 </div>
                 <div style={styles.row}><span style={styles.label}>出場時間／成本</span><span>{wallTime(trade.closedAt)}／{money(trade.costNtd)}</span></div>
                 <div style={styles.row}><span style={styles.label}>成本後已實現損益（虛擬）</span><strong style={trade.realizedNtd >= 0 ? styles.good : styles.bad}>{money(trade.realizedNtd)}</strong></div>
