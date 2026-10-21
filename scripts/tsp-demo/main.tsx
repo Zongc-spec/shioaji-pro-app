@@ -66,6 +66,23 @@ if (tfLabel) {
     };
     setTimeout(click, 300);
 }
+// ?audit=trades（events／signals／entries）：載入後打開審計視窗並切到該分頁（截圖用）
+const auditTab = params.get('audit');
+if (auditTab) {
+    const TAB: Record<string, string> = { events: '事件', signals: '5m 訊號', entries: '1m 提示', trades: '虛擬部位' };
+    const pick = () => {
+        const tab = [...document.querySelectorAll('button')].find((b) => b.textContent?.startsWith(TAB[auditTab] ?? auditTab));
+        if (tab) tab.click();
+        else setTimeout(pick, 200);
+    };
+    const open = () => {
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent === '審計' && !b.disabled);
+        if (!btn) return void setTimeout(open, 300);
+        btn.click();
+        setTimeout(pick, 200);
+    };
+    setTimeout(open, 500);
+}
 
 const tmf = { code: 'TMFR1', target_code: 'TMFI6', name: '微型臺指 09月', symbol: 'TMFR1', security_type: 'FUT', exchange: 'TAIFEX',
     category: 'TMF', root: 'TMF', currency: 'TWD', tick: 1, multiplier: 10, delivery_month: '202609',

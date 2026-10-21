@@ -2,7 +2,8 @@
 // 從 BUY／SELL 收棒之後開始，直到 5m 狀態離開該方向（反向、失效）為止都可提示；
 // windowBars > 0 時只取翻轉後 N 根 5m（可選的 post-flip window，不跨盤）。
 // 每根 1m 只看 label ≤ 它的最後一根已收 5m：那根不是前一個 5m 桶（換盤後尚未收第一根、
-// 資料缺洞）就是過期，不提示。每盤最後一根 1m 不提示：下一根開盤已是下一盤，無法成交。
+// 資料缺洞）就是過期，不提示。所屬 5m 桶在它之前已缺 1m（資料不完整）也不提示。
+// 每盤最後一根 1m 不提示：下一根開盤已是下一盤，無法成交。
 
 import type { Candle } from '../../types/market';
 import { firstAfter, freshAt } from '../core/bars';
@@ -13,6 +14,8 @@ export interface SegmentInputs {
     m1: Candle[];
     /** 每根 1m 所屬交易時段的收盤 label */
     m1SessionEnd: number[];
+    /** 每根 1m 所屬 5m 桶在它之前是否已缺 1m（core/bars.ts holeBefore） */
+    m1Hole: boolean[];
     m5: Candle[];
     dir5: TrendState[];
     windowBars: number;
@@ -44,7 +47,7 @@ export function trendSegment(sig: TrendSignal, inp: SegmentInputs): TrendSegment
         const t = m1[m]!.time;
         if ((endedAt !== null && t >= endedAt) || t > windowEnd) break;
         while (j + 1 < m5.length && m5[j + 1]!.time <= t) j++;
-        if (!freshAt(m5[j]!.time, t, 5) || t >= inp.m1SessionEnd[m]!) continue;
+        if (!freshAt(m5[j]!.time, t, 5) || t >= inp.m1SessionEnd[m]! || inp.m1Hole[m]) continue;
         bars.push(m);
     }
     return { signal: sig, bars, endedAt, endState: endedAt !== null ? dir5[k]! : null, windowEnd };

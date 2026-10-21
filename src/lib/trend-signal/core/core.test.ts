@@ -3,9 +3,9 @@
 import { describe, expect, it } from 'vitest';
 import { aggregate } from '../../utils/kbars';
 import { pathBars, sessionLabels, T, walkBars } from '../fixtures.test-harness';
-import { buildTf, confirmed1m, firstAfter, freshAt, lastAtOrBefore, tfBucket } from './bars';
+import { buildTf, completeOnly, confirmed1m, firstAfter, freshAt, holeBefore, lastAtOrBefore, tfBucket } from './bars';
 import { composeBars, mergeTick, minuteLabel, rebaseTail } from './live';
-import { isSessionOpen, tradingSessionOf } from './session';
+import { isRegularMinute, isSessionOpen, tradingSessionOf } from './session';
 
 describe('confirmed1m', () => {
     const bars = walkBars(sessionLabels('2026-10-19', 1), 1);
@@ -60,6 +60,51 @@ describe('buildTf', () => {
         expect(s.session[j]).toBe('2026-10-19N');
         expect(s.sessionEnd[i]).toBe(T('2026-10-20T05:00:00'));
         expect(s.sessionEnd[s.bars.findIndex((b) => b.time === T('2026-10-19T09:00:00'))]).toBe(T('2026-10-19T13:45:00'));
+    });
+});
+
+describe('資料完整性（正規交易分鐘、缺分鐘計數、排除不完整的桶）', () => {
+    it('正規交易分鐘：日盤 08:46–13:45、夜盤 15:01–05:00；收盤定盤寬限與週末不算', () => {
+        expect(isRegularMinute('FUT', T('2026-10-20T08:46:00'))).toBe(true);
+        expect(isRegularMinute('FUT', T('2026-10-20T08:45:00'))).toBe(false);
+        expect(isRegularMinute('FUT', T('2026-10-20T13:45:00'))).toBe(true);
+        expect(isRegularMinute('FUT', T('2026-10-20T13:46:00'))).toBe(false);
+        expect(isRegularMinute('FUT', T('2026-10-20T15:01:00'))).toBe(true);
+        expect(isRegularMinute('FUT', T('2026-10-21T05:00:00'))).toBe(true);
+        expect(isRegularMinute('FUT', T('2026-10-21T05:01:00'))).toBe(false);
+        expect(isRegularMinute('FUT', T('2026-10-24T02:00:00'))).toBe(true); // 週五夜盤
+        expect(isRegularMinute('FUT', T('2026-10-24T09:00:00'))).toBe(false); // 週六
+    });
+    const labels = sessionLabels('2026-10-19', 1);
+    const bars = walkBars(labels, 3);
+    it('完整的 5m／15m／60m 缺 0；開盤第一根 60m（08:46–09:00）只要求 15 根', () => {
+        for (const tf of [5, 15, 60] as const) expect(buildTf(bars, tf, 'FUT', Infinity).missing.every((m) => m === 0)).toBe(true);
+    });
+    it('桶內缺分鐘：計數正確，completeOnly 排除並列出缺口；收盤定盤桶（只有寬限分鐘）不算缺', () => {
+        const drop = new Set([T('2026-10-19T10:27:00'), T('2026-10-19T10:28:00'), T('2026-10-19T10:29:00'), T('2026-10-19T10:30:00')]);
+        const grace = { ...bars.find((b) => b.time === T('2026-10-19T13:45:00'))!, time: T('2026-10-19T13:47:00') };
+        const gapped = [...bars.filter((b) => !drop.has(b.time) && b.time <= T('2026-10-19T13:45:00')), grace, ...bars.filter((b) => b.time > T('2026-10-19T13:45:00'))];
+        const s5 = buildTf(gapped, 5, 'FUT', Infinity);
+        expect(s5.missing[s5.bars.findIndex((b) => b.time === T('2026-10-19T10:30:00'))]).toBe(4);
+        expect(s5.missing[s5.bars.findIndex((b) => b.time === T('2026-10-19T13:50:00'))]).toBe(0);
+        const { series, gaps } = completeOnly(s5);
+        expect(gaps).toEqual([{ tf: 5, label: T('2026-10-19T10:30:00'), missing: 4 }]);
+        expect(series.bars.some((b) => b.time === T('2026-10-19T10:30:00'))).toBe(false);
+        expect(series.bars).toHaveLength(s5.bars.length - 1);
+        expect(series.missing.every((m) => m === 0)).toBe(true);
+        const s60 = buildTf(gapped, 60, 'FUT', Infinity);
+        expect(s60.missing[s60.bars.findIndex((b) => b.time === T('2026-10-19T11:00:00'))]).toBe(4);
+    });
+    it('holeBefore：1m 所屬 5m 桶在它之前已缺正規分鐘（只看之前；開盤、收盤定盤桶不誤判）', () => {
+        expect(holeBefore(bars, 'FUT').every((x) => !x)).toBe(true);
+        const drop = new Set(['08:46', '10:27', '10:29'].map((hm) => T(`2026-10-19T${hm}:00`)));
+        const grace = { ...bars.find((b) => b.time === T('2026-10-19T13:45:00'))!, time: T('2026-10-19T13:47:00') };
+        const gapped = [...bars.filter((b) => !drop.has(b.time) && b.time <= T('2026-10-19T13:45:00')), grace, ...bars.filter((b) => b.time > T('2026-10-19T13:45:00'))];
+        const h = holeBefore(gapped, 'FUT');
+        const at = (hm: string) => h[gapped.findIndex((b) => b.time === T(`2026-10-19T${hm}:00`))];
+        expect(['08:47', '08:50', '08:51'].map(at)).toEqual([true, true, false]);
+        expect(['10:26', '10:28', '10:30', '10:31'].map(at)).toEqual([false, true, true, false]);
+        expect(at('13:47')).toBe(false);
     });
 });
 

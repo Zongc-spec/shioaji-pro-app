@@ -1,4 +1,4 @@
-// Trend Signal Pro — 自訂指標版（對應原生 tsp-1.1.0 的趨勢核心與 1m 提示）
+// Trend Signal Pro — 自訂指標版（對應原生 tsp-1.1.1 的趨勢核心與 1m 提示）
 //
 // 用法：Shioaji Pro「指標 → 自訂指標 → 建立」，位置選「主圖疊加」，把本檔全部貼進程式碼欄 →
 // 驗證 → 儲存，再到指標選單加入。參數都可以不設（用下方預設）；要調整時在「參數」表加同名代號，
@@ -13,7 +13,10 @@
 //   1m      5m 趨勢由已收 1m 聚合而來（每根 1m 只看當時已收的 5m），並畫 1m 進場提示
 //   5m      5m 趨勢核心
 //   其他    該週期自己的趨勢（相當於 Dashboard 的高週期輔助，不是 5m 訊號）
-// 只用已收 K 棒：K 棒收盤時間 ≤ 現在（台灣時間）− 10 秒才算收完；進行中的 K 棒不產生任何訊號。
+// 只用已收 K 棒：後面已經有下一根 K 棒（下一分鐘的成交已送達），或該盤已收盤（含 4 分鐘定盤寬限），
+// 那一根才算收完；不靠時鐘猜。1m 主圖聚合出的 5m 缺任何一分鐘就排除（不產生訊號與提示），
+// 桶內出現缺口後的 1m 也不提示。
+// 自訂指標每次重算都從頭來、沒有凍結：主圖「更新歷史」改了舊 K 棒時，結果可能跟著變（原生版不會）。
 // 圓點：綠／紅＝多／空趨勢線；BUY／SELL＝趨勢切換；失效＝Donchian＋ATR 跌破追蹤帶（不是反向）；
 // 1m 微型／結構＝5m 方向內的進場提示（不是委託，也不是另一組 BUY／SELL）。
 
@@ -224,6 +227,17 @@ function sessionEnd(t) {
     return d0 + 86400 + 5 * HOUR;
 }
 
+// 正規交易分鐘（日盤 08:46–13:45、夜盤 15:01–05:00；不含定盤寬限與週末）：5m 的完整性以它為準
+function regularMinute(t) {
+    const d0 = Math.floor(t / 86400) * 86400;
+    const tod = t - d0;
+    const start = tod <= 5 * HOUR ? d0 - 86400 + 15 * HOUR : tod <= 13.75 * HOUR ? d0 + 8.75 * HOUR : d0 + 15 * HOUR;
+    const end = tod <= 5 * HOUR ? d0 + 5 * HOUR : tod <= 13.75 * HOUR ? d0 + 13.75 * HOUR : d0 + 86400 + 5 * HOUR;
+    if (!(t > start && t <= end)) return false;
+    const wd = new Date(start * 1000).getUTCDay();
+    return wd !== 0 && wd !== 6;
+}
+
 // 已確認轉折：左側 left 根嚴格較低（高）、右側 right 根不高於（不低於）；右側收完才成立
 function pivots(hl, n, left, right, isHigh) {
     const out = [];
@@ -259,9 +273,11 @@ function latestBefore(ps, m, before) {
 // ---- 主程式 ----
 
 const n = close.length;
-const asOf = Math.floor(Date.now() / 1000) + 8 * HOUR - 10;
-let nc = n; // 已收 K 棒數（時間遞增）
-while (nc > 0 && !(time[nc - 1] <= asOf)) nc--;
+const now = Math.floor(Date.now() / 1000) + 8 * HOUR;
+// 已收 K 棒數：最後一根要等下一根出現（下一分鐘的成交已送達），或該盤收盤（含寬限）再過 10 秒
+let nc = n;
+if (nc > 0 && !(now >= sessionEnd(time[nc - 1]) + GRACE + 10)) nc--;
+const asOf = nc > 0 ? time[nc - 1] : -Infinity;
 let step = Infinity;
 for (let i = Math.max(1, nc - 300); i < nc; i++) {
     const d = time[i] - time[i - 1];
@@ -296,35 +312,58 @@ if (step > 60) {
     }
 } else if (nc > 0) {
     // 1m 主圖：已收 1m → 5m（與主圖聚合相同：收盤 label＝向上取整到 5 分）
-    const t5 = [];
-    const h5 = [];
-    const l5 = [];
-    const c5 = [];
-    const last5 = [];
+    let t5 = [];
+    let h5 = [];
+    let l5 = [];
+    let c5 = [];
+    let last5 = [];
+    const present = [];
+    const hole = []; // 1m 所屬的 5m 桶在它之前已缺正規分鐘（資料不完整）：這根不提示
     for (let i = 0; i < nc; i++) {
         const lb = Math.ceil(time[i] / 300) * 300;
         const k = t5.length - 1;
+        const reg = regularMinute(time[i]) ? 1 : 0;
+        let before = 0;
+        for (let m = lb - 240; m < time[i]; m += 60) if (regularMinute(m)) before++;
+        hole.push(before > (k < 0 || t5[k] !== lb ? 0 : present[k]));
         if (k < 0 || t5[k] !== lb) {
             t5.push(lb);
             h5.push(high[i]);
             l5.push(low[i]);
             c5.push(close[i]);
             last5.push(i);
+            present.push(reg);
         } else {
             h5[k] = Math.max(h5[k], high[i]);
             l5[k] = Math.min(l5[k], low[i]);
             c5[k] = close[i];
             last5[k] = i;
+            present[k] += reg;
         }
     }
-    // 最後一個 5m 桶：收盤 label ≤ 現在，或該盤已收盤（含寬限）才算收完
+    // 最後一個 5m 桶：收盤 label ≤ 最後一根已收 1m，或該盤已收盤（含寬限）才算收完
     const kl = t5.length - 1;
-    if (kl >= 0 && !(t5[kl] <= asOf || asOf >= sessionEnd(time[last5[kl]]) + GRACE)) {
+    if (kl >= 0 && !(t5[kl] <= asOf || now >= sessionEnd(time[last5[kl]]) + GRACE)) {
         t5.pop();
         h5.pop();
         l5.pop();
         c5.pop();
         last5.pop();
+        present.pop();
+    }
+    // 缺任何正規分鐘的 5m 排除：不參與趨勢計算，也不產生訊號與提示（與原生相同）
+    const keep = [];
+    for (let k = 0; k < t5.length; k++) {
+        let expected = 0;
+        for (let m = t5[k] - 240; m <= t5[k]; m += 60) if (regularMinute(m)) expected++;
+        if (present[k] >= expected) keep.push(k);
+    }
+    if (keep.length < t5.length) {
+        t5 = keep.map((k) => t5[k]);
+        h5 = keep.map((k) => h5[k]);
+        l5 = keep.map((k) => l5[k]);
+        c5 = keep.map((k) => c5[k]);
+        last5 = keep.map((k) => last5[k]);
     }
     const tr5 = track(h5, l5, c5, T);
     // 每根 1m（含進行中的那一根）只看當時已收的 5m
@@ -357,7 +396,7 @@ if (step > 60) {
         else sell[at] = above(at, 0.5);
 
         // 這段趨勢可提示的 1m：訊號收棒後到 5m 離開該方向為止；可選翻轉後 N 根 5m（不跨盤）；
-        // 5m 過期（換盤後尚未收第一根、資料缺洞）與每盤最後一根 1m 不提示
+        // 5m 過期（換盤後尚未收第一根、資料缺洞）、5m 桶內已缺 1m、每盤最後一根 1m 不提示
         let kk = k + 1;
         while (kk < t5.length && tr5.st[kk] === want) kk++;
         const endedAt = kk < t5.length ? t5[kk] : Infinity;
@@ -368,7 +407,7 @@ if (step > 60) {
             const t = time[m];
             if (t >= endedAt || t > windowEnd) break;
             while (jj + 1 < t5.length && t5[jj + 1] <= t) jj++;
-            if (!(t5[jj] >= Math.ceil(t / 300) * 300 - 300) || t >= sessionEnd(t)) continue;
+            if (!(t5[jj] >= Math.ceil(t / 300) * 300 - 300) || t >= sessionEnd(t) || hole[m]) continue;
             seg.push(m);
         }
 

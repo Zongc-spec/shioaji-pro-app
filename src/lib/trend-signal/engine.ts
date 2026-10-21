@@ -5,12 +5,13 @@
 //   EntryTiming  每段 5m 趨勢內各候選的 1m 提示
 //   RiskPlanner  依設定模式的提示產生虛擬部位（不送單）
 // 依賴單向：下游只讀上游的輸出，訊號不會因進場或風控參數改變。同一輸入永遠
-// 得到同一輸出；任何時點只用該時點以前已收的 K 棒。
+// 得到同一輸出；任何時點只用該時點以前已收的 K 棒；5m 只用資料完整的桶。
+// 「已收」由呼叫端的 asOf 決定（即時運作見 core/feed.ts：以資料進度而非牆鐘確認）。
 
 import { atr } from '../indicators';
 import type { Candle } from '../types/market';
-import { alignPoints, buildTf, confirmed1m, freshAt } from './core/bars';
-import { isSessionOpen, wallIso, wallTime } from './core/session';
+import { alignPoints, buildTf, completeOnly, confirmed1m, freshAt, holeBefore } from './core/bars';
+import { isSessionOpen, wallHm, wallIso, wallTime } from './core/session';
 import { configKey, entryKey, microParams, riskKey, TSP_ALGO_VERSION, trendKey } from './config';
 import { runVirtual } from './risk/virtual';
 import { tfAt } from './trend/mtf';
@@ -58,6 +59,7 @@ function tfSnapshot(s: TfSeries, tr: TrendTrack, note: NoteParams, m5Dir: TrendS
         keyHigh: lv?.high,
         keyLow: lv?.low,
         stale: sessionOpen && !freshAt(bar?.time, asOf, s.tf),
+        incomplete: i >= 0 && s.missing[i]! > 0,
     };
 }
 
@@ -70,7 +72,8 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
     // ---- core ----
     const bars1: Candle[] = confirmed1m(input.bars1m, asOf);
     const m1 = buildTf(bars1, 1, sec, asOf);
-    const m5 = buildTf(bars1, 5, sec, asOf);
+    // 5m 只用完整的桶：缺任何正規交易分鐘的 5m 不參與趨勢計算，也不產生訊號、提示或虛擬進場
+    const { series: m5, gaps } = completeOnly(buildTf(bars1, 5, sec, asOf));
     const m15 = buildTf(bars1, 15, sec, asOf);
     const m60 = buildTf(bars1, 60, sec, asOf);
 
@@ -118,6 +121,8 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
                 m60BarTime: h60.barTime,
                 m15Stale: h15.stale,
                 m60Stale: h60.stale,
+                m15Incomplete: h15.incomplete,
+                m60Incomplete: h60.incomplete,
             },
         });
     }
@@ -128,6 +133,8 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
         m1: m1.bars,
         m1Session: m1.session,
         m1SessionEnd: m1.sessionEnd,
+        // 5m 桶內出現缺口後的 1m 不提示（缺口所在的 5m 已排除，提示也不能用不完整的資料）
+        m1Hole: holeBefore(bars1, sec),
         m5: m5.bars,
         dir5: t5.dir,
         micro: t1.dir,
@@ -173,8 +180,17 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
     for (const e of selected) {
         events.push({ time: e.barTime, kind: 'ENTRY', ref: e.id, text: `1m 進場提示 ${e.mode} 第 ${e.seq} 次 ${e.direction === 'LONG' ? '多' : '空'} @ ${e.refPrice}（${e.reason}）` });
     }
+    for (const g of gaps) {
+        events.push({
+            time: g.label,
+            kind: 'DATA',
+            ref: `${idBase}|5m|${wallIso(g.label)}|GAP`,
+            text: `5m ${wallHm(g.label)} 缺 ${g.missing} 根 1m：資料不完整，已排除（不參與趨勢計算，不產生訊號、提示或虛擬進場）`,
+        });
+    }
     events.push(...v.events);
     events.sort((a, b) => a.time - b.time);
+    const lastGap = gaps[gaps.length - 1];
 
     const s5 = tfSnapshot(m5, t5, cfg.note, null, asOf, sessionOpen);
     const s1 = tfSnapshot(m1, t1, cfg.note, s5.dir, asOf, sessionOpen);
@@ -203,6 +219,7 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
         ema5,
         signals,
         invalidations,
+        gaps,
         entries,
         trades: v.trades,
         events,
@@ -213,6 +230,7 @@ export function runTrendSignal(input: TrendSignalInput): TrendSignalResult {
             m60: s60,
             signal: latest,
             invalid: lastInvalid && (!latest || lastInvalid.barTime > latest.barTime) ? lastInvalid : null,
+            recentGap: lastGap && asOf - lastGap.label <= 1800 ? lastGap : null,
             entries: timing.states,
             htfAgainst: s15.align === 'DIVERGE' && s60.align === 'DIVERGE',
             trade: open ?? v.trades[v.trades.length - 1] ?? null,

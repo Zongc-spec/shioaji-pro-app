@@ -1,10 +1,10 @@
 // src/lib/trend-signal/trigger/trigger.test.ts — EntryTiming（V1.1 §4）：提示範圍＝整段 5m 同向
 // 狀態（可選 post-flip 窗口），5m 反向／失效即停止、換盤後與資料缺洞時 5m 過期不提示、
-// 每盤最後一根不提示；IMMEDIATE 每段一次、MICRO_TREND 每次「反向／中性後轉回同向」都提示、
+// 5m 桶內缺 1m 之後不提示、每盤最後一根不提示；IMMEDIATE 每段一次、MICRO_TREND 每次「反向／中性後轉回同向」都提示、
 // PRICE_STRUCTURE 只用已確認轉折且提示後要有新的回檔轉折；空單鏡像；先前策略假說只在選用時計算。
 import { describe, expect, it } from 'vitest';
 import type { Candle } from '../../types/market';
-import { buildTf } from '../core/bars';
+import { buildTf, holeBefore } from '../core/bars';
 import { DEFAULT_CONFIG } from '../config';
 import { T } from '../fixtures.test-harness';
 import type { EntryParams, TrendSignal, TrendState } from '../types';
@@ -34,7 +34,7 @@ function signal(kind: 'BUY' | 'SELL', barTime: number, m1: Candle[], over: Parti
         close: m5.bars[index]!.close,
         line: undefined,
         atr: undefined,
-        notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null, m15Stale: false, m60Stale: false },
+        notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null, m15Stale: false, m60Stale: false, m15Incomplete: false, m60Incomplete: false },
         ...over,
     };
 }
@@ -43,7 +43,7 @@ function signal(kind: 'BUY' | 'SELL', barTime: number, m1: Candle[], over: Parti
 function segOf(sig: TrendSignal, m1: Candle[], dir5At?: (t: number) => TrendState, windowBars = 0) {
     const m5 = buildTf(m1, 5, 'FUT', Infinity).bars;
     const dir5 = m5.map((b) => dir5At?.(b.time) ?? sig.direction);
-    return trendSegment(sig, { m1, m1SessionEnd: buildTf(m1, 1, 'FUT', Infinity).sessionEnd, m5, dir5, windowBars });
+    return trendSegment(sig, { m1, m1SessionEnd: buildTf(m1, 1, 'FUT', Infinity).sessionEnd, m1Hole: holeBefore(m1, 'FUT'), m5, dir5, windowBars });
 }
 const labelsOf = (m1: Candle[], idx: number[]) => idx.map((m) => m1[m]!.time);
 const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, k) => a + k);
@@ -85,11 +85,18 @@ describe('提示範圍（整段 5m 趨勢）', () => {
         const hm = labelsOf(m, seg.bars).map((t) => new Date(t * 1000).toISOString().slice(11, 16));
         expect(hm).toEqual(['13:36', '13:37', '13:38', '13:39', '13:40', '13:41', '13:42', '13:43', '13:44', '15:05', '15:06', '15:07', '15:08', '15:09', '15:10', '15:11', '15:12']);
     });
-    it('資料缺洞：缺整根 5m 時過期不提示，下一根 5m 收棒後恢復', () => {
+    it('資料缺洞：缺整根 5m 時過期不提示；缺口所在的 5m 桶剩下的 1m 也不提示；下一根 5m 收棒後恢復', () => {
         const gap = m1.filter((b) => b.time < t0 + 960 || b.time > t0 + 1620); // 缺 09:16–09:27
         const seg = segOf(signal('BUY', t0 + 600, gap), gap);
         const mins = labelsOf(gap, seg.bars).map((t) => (t - t0) / 60);
-        expect(mins).toEqual([...range(11, 15), ...range(30, 39)]);
+        // 09:30 的桶（09:26–09:30）缺 09:26、09:27：09:28–09:30 不提示
+        expect(mins).toEqual([...range(11, 15), ...range(31, 39)]);
+    });
+    it('5m 桶內缺 1m：缺口之後到該桶收盤不提示，缺口之前照常（因果，不看未來）', () => {
+        const gap = m1.filter((b) => b.time !== t0 + 1020); // 缺 09:17
+        const seg = segOf(signal('BUY', t0 + 600, gap), gap);
+        const mins = labelsOf(gap, seg.bars).map((t) => (t - t0) / 60);
+        expect(mins).toEqual([...range(11, 16), ...range(21, 39)]);
     });
 });
 
@@ -262,6 +269,7 @@ describe('computeEntries', () => {
         m1,
         m1Session: s1.session,
         m1SessionEnd: s1.sessionEnd,
+        m1Hole: holeBefore(m1, 'FUT'),
         m5: s5.bars,
         dir5: s5.bars.map((): TrendState => 'LONG'),
         micro: m1.map((_, i): TrendState => (i === 15 ? 'SHORT' : 'LONG')),
@@ -285,5 +293,11 @@ describe('computeEntries', () => {
     });
     it('沒有 5m 訊號：沒有提示', () => {
         expect(computeEntries({ ...base, signals: [], p: P })).toEqual({ entries: [], states: {} });
+    });
+    it('目前這根 5m 已缺 1m：狀態說明資料不完整', () => {
+        const gap = m1.filter((b) => b.time !== t0 + 60 * 37); // 缺 09:37，最後一根 09:39
+        const g1 = buildTf(gap, 1, 'FUT', Infinity);
+        const r = computeEntries({ ...base, m1: gap, m1Session: g1.session, m1SessionEnd: g1.sessionEnd, m1Hole: holeBefore(gap, 'FUT'), micro: gap.map((): TrendState => 'LONG'), asOf: gap.at(-1)!.time, p: P });
+        expect(r.states.MICRO_TREND!.waiting).toContain('資料不完整');
     });
 });

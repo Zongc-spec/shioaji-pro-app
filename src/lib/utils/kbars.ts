@@ -67,7 +67,12 @@ const TW_OFFSET_SEC = 8 * 3600;
 
 // 現在時刻的台灣牆鐘時間，用 wallClockToUtc 同款編碼
 export function nowWallClockUtc(): number {
-    return Math.floor(Date.now() / 1000) + TW_OFFSET_SEC;
+    return msToWallClockUtc(Date.now());
+}
+
+// epoch 毫秒（Date.now() 同款）→ 台灣牆鐘時間，用 wallClockToUtc 同款編碼
+export function msToWallClockUtc(ms: number): number {
+    return Math.floor(ms / 1000) + TW_OFFSET_SEC;
 }
 
 // 台灣日期 N 天前（負數 = 之後）的 YYYY-MM-DD

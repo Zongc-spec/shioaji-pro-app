@@ -11,7 +11,7 @@ import { maskMoney, usePrivacyMode } from '../lib/privacy';
 import { TSP_ALGO_VERSION, TSP_PERMISSIONS } from '../lib/trend-signal/config';
 import { wallHm, wallTime } from '../lib/trend-signal/core/session';
 import { futuresTax } from '../lib/trend-signal/risk/plan';
-import { exitText } from '../lib/trend-signal/risk/virtual';
+import { exitText, fillWhen } from '../lib/trend-signal/risk/virtual';
 import type {
     Alignment,
     AuditEvent,
@@ -22,6 +22,8 @@ import type {
     TrendSignalConfig,
     TrendSignalResult,
     TrendState,
+    TradeFill,
+    VirtualTrade,
 } from '../lib/trend-signal/types';
 import type { ContractBase } from '../lib/types/contract';
 import { formatToTick } from '../lib/utils/ticksize';
@@ -158,11 +160,17 @@ export function feedBadge(feed: TrendSignalFeed): { cls: keyof typeof s.badge; t
     if (!res) return { cls: 'idle', text: feed.loading ? '載入 20 天 1m…' : '等待資料' };
     if (feed.stream !== 'live') return { cls: 'down', text: `行情未連線（${feed.stream}）— 訊號不可交易` };
     if (!res.sessionOpen) return { cls: 'idle', text: '休市' };
+    // 斷線重連、缺分鐘：補抓歷史涵蓋前不確認新 K 棒
+    if (feed.pendingFrom !== null) return { cls: 'warn', text: `資料補齊中：${wallHm(feed.pendingFrom)} 起尚未確認` };
     // 時段判定不知道國定假日：盤中時段超過 30 分鐘沒有任何已收 1m，多半是休市
     if (res.dataLagSec !== null && res.dataLagSec > 1800) return { cls: 'idle', text: '無新資料（可能休市）' };
+    if (feed.confirmLagSec > 180) return { cls: 'warn', text: `確認延遲 ${Math.round(feed.confirmLagSec)} 秒` };
     if (res.dataLagSec !== null && res.dataLagSec > 180) return { cls: 'warn', text: `資料延遲 ${Math.round(res.dataLagSec)} 秒` };
     return { cls: 'live', text: 'LIVE' };
 }
+
+/** 成交時刻（與審計事件同一個時間軸）：開盤成交顯示開盤那一刻，盤中觸價顯示那根 1m 的區間 */
+const fillAtText = (f: TradeFill) => fillWhen(f.time, f.at);
 
 function TfRow({ label, snap, px, showAlign }: { label: string; snap: TfSnapshot; px: (v: number | undefined) => string; showAlign: boolean }) {
     return (
@@ -174,6 +182,7 @@ function TfRow({ label, snap, px, showAlign }: { label: string; snap: TfSnapshot
                 {showAlign && <span className={s.tag[snap.align]}>{ALIGN_TEXT[snap.align]}</span>}
                 {showAlign && <span>H {px(snap.keyHigh)} L {px(snap.keyLow)}</span>}
                 {snap.stale && <span className={s.stale} title='最後一根不是前一個週期桶（換盤後尚未收第一根、或資料缺洞）'>過期</span>}
+                {snap.incomplete && <span className={s.stale} title='最後一根缺少 1m（高週期只標示，不排除）'>缺資料</span>}
             </span>
             <span className={s.rowTime} title='最後一根已收 K 棒的收盤時間'>{hm(snap.barTime)}</span>
         </div>
@@ -306,6 +315,12 @@ export function TrendSignalPanel({
                             <TfRow label='60m 背景' snap={snap.m60} px={px} showAlign />
                             {snap.htfAgainst && <div className={s.warn}>⚠ 高週期逆向：15m 與 60m 都與 5m 反向（只提示，不改訊號）</div>}
                             {snap.m1Against && <div className={s.warn}>⚠ 1m 微型趨勢與虛擬部位反向（只警告，不出場）</div>}
+                            {snap.recentGap && (
+                                <div className={s.warn}>⚠ 5m {hm(snap.recentGap.label)} 缺 {snap.recentGap.missing} 根 1m：資料不完整，已排除（不產生訊號、提示或虛擬進場）</div>
+                            )}
+                            {feed.lateTicks > 0 && (
+                                <div className={s.note}>已忽略 {feed.lateTicks} 筆晚到成交：所屬分鐘已確認，不改寫已收 K 棒</div>
+                            )}
                         </>
                     )}
                     <div className={s.note}>5m BUY／SELL＝主趨勢切換；1m ENTRY＝5m 方向內的執行候選（不是委託）。★ 為虛擬風控採用的模式。自行設計的公開演算法，非 Universal Indicator／Ultimate AI 原版，未驗證優於原版。</div>
@@ -334,24 +349,26 @@ export function TrendSignalPanel({
                             <>
                                 <div>
                                     上一筆（已出場）：<span className={s.dir[trade.direction]}>{trade.direction === 'LONG' ? '多' : '空'}</span>{' '}
-                                    {trade.qty} 口 @ {px(trade.fillPrice)}（{hm(trade.fillTime - 60)} 成交，{MODE_TEXT[trade.entryMode]}提示 {hm(trade.signalTime)}）
+                                    {trade.qty} 口 @ {px(trade.fillPrice)}（{fillWhen(trade.fillTime, 'open')}成交；{MODE_TEXT[trade.entryMode]} {hm(trade.signalTime)} 收棒的提示）
                                 </div>
-                                <div>出場：{trade.fills.map((f) => `${exitText(f.reason)} ${f.qty} 口 @ ${px(f.price)}（${hm(f.time)}）`).join('；')}</div>
-                                <div>初始停損 {px(trade.plan.stop)} · R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)} · 已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點／{money(trade.realizedNtd)}（虛擬，扣手續費與期交稅）</div>
+                                <div>出場：{trade.fills.map((f) => `${exitText(f.reason)} ${f.qty} 口 @ ${px(f.price)}（${fillAtText(f)}）`).join('；')}</div>
+                                <div>
+                                    初始停損 {px(trade.plan.stop)} · R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)} · 已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點，扣手續費＋期交稅 {money(trade.costNtd)} 後 {money(trade.realizedNtd)}（虛擬）
+                                </div>
                             </>
                         )}
                         {open && (
                             <>
                                 <div>
                                     <span className={s.dir[open.direction]}>{open.direction === 'LONG' ? '多' : '空'}</span>{' '}
-                                    {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{hm(open.fillTime - 60)} 成交，{MODE_TEXT[open.entryMode]}提示 {hm(open.signalTime)}）
+                                    {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{fillWhen(open.fillTime, 'open')}成交；{MODE_TEXT[open.entryMode]} {hm(open.signalTime)} 收棒的提示）
                                 </div>
                                 <div>初始停損 {px(open.plan.stop)}（{open.plan.stopBasis === 'swing' ? '擺動點' : open.plan.stopBasis === 'atr' ? '1m ATR' : 'ATR 備援'}）· R {open.plan.riskPoints} 點／{money(open.plan.riskPerLot * open.qty)}</div>
                                 <div>1R {px(open.plan.r1)} · 2R {px(open.plan.r2)} · 3R {px(open.plan.r3)} · 保本 {px(open.plan.breakevenStop)}</div>
                                 <div>目前停損 {px(open.stop)}（{open.stopKind === 'initial' ? '初始' : open.stopKind === 'breakeven' ? '保本' : '移動'}）{open.trailing ? ' · 移動停損啟動' : ''}</div>
                                 <div>
-                                    {unrealPts !== null && unrealNtd !== null && <>未實現 {unrealPts >= 0 ? '+' : ''}{unrealPts} 點／{money(unrealNtd)} · </>}
-                                    已實現 {open.realizedPoints >= 0 ? '+' : ''}{open.realizedPoints} 點／{money(open.realizedNtd)}（虛擬，扣手續費與期交稅）
+                                    {unrealPts !== null && unrealNtd !== null && <>未實現 {unrealPts >= 0 ? '+' : ''}{unrealPts} 點／扣成本後 {money(unrealNtd)} · </>}
+                                    已實現 {open.realizedPoints >= 0 ? '+' : ''}{open.realizedPoints} 點／扣成本後 {money(open.realizedNtd)}（虛擬，手續費＋期交稅）
                                 </div>
                                 {snap?.pendingExit && (
                                     <div className={s.warn}>
@@ -374,6 +391,18 @@ export function TrendSignalPanel({
 
 type AuditTab = 'events' | 'signals' | 'entries' | 'trades';
 
+/** 審計的部位合計（只算已平倉）：點數含滑價、成本＝手續費＋期交稅、淨額＝成本後 */
+export function tradeSummary(trades: VirtualTrade[]) {
+    const closed = trades.filter((t) => t.status === 'CLOSED');
+    return {
+        closed: closed.length,
+        wins: closed.filter((t) => t.realizedNtd > 0).length,
+        points: closed.reduce((a, t) => a + t.realizedPoints, 0),
+        cost: closed.reduce((a, t) => a + t.costNtd, 0),
+        net: closed.reduce((a, t) => a + t.realizedNtd, 0),
+    };
+}
+
 export function auditExport(res: TrendSignalResult, config?: TrendSignalConfig) {
     return {
         version: res.version,
@@ -383,9 +412,12 @@ export function auditExport(res: TrendSignalResult, config?: TrendSignalConfig) 
         contractMonth: res.contractMonth,
         asOf: wallTime(res.asOf),
         permissions: TSP_PERMISSIONS,
-        dataSource: 'shioaji kbars 1m（20 個日曆日）＋ SSE 逐筆成交；只用已收 K 棒',
+        dataSource: 'shioaji kbars 1m（20 個日曆日）＋ SSE 逐筆成交；只用已收且資料完整的 K 棒，已確認的分鐘不再改寫',
+        timeConvention: 'K 棒時間為收盤 label；成交 fills[].time 為所在 1m 的 label，at=open 表示該 1m 開盤（label − 60）成交、at=intrabar 表示盤中觸價；events[].time 為實際發生時刻',
+        summary: tradeSummary(res.trades),
         signals: res.signals,
         invalidations: res.invalidations,
+        dataGaps: res.gaps,
         entries: res.entries,
         trades: res.trades,
         events: res.events.map((e) => ({ ...e, at: wallTime(e.time) })),
@@ -395,8 +427,11 @@ export function auditExport(res: TrendSignalResult, config?: TrendSignalConfig) 
 function AuditDialog({ res, config, onClose }: { res: TrendSignalResult; config: TrendSignalConfig; onClose: () => void }) {
     const [tab, setTab] = useState<AuditTab>('events');
     const [copied, setCopied] = useState('');
+    const privacy = usePrivacyMode();
+    const money = (v: number) => maskMoney(`NT$${Math.round(v).toLocaleString('en-US')}`, privacy);
     useEscClose(onClose);
     const json = () => JSON.stringify(auditExport(res, config), null, 2);
+    const sum = tradeSummary(res.trades);
     // 5m 切換與失效依時間合併成同一張表
     const fiveMin = [
         ...res.signals.map((g) => ({ id: g.id, time: g.barTime, kind: g.kind as string, signal: g })),
@@ -431,11 +466,17 @@ function AuditDialog({ res, config, onClose }: { res: TrendSignalResult; config:
                         <button key={k} className={tab === k ? s.btnOn : s.btn} onClick={() => setTab(k)}>{label}</button>
                     ))}
                 </div>
+                {tab === 'trades' && (
+                    <div className={s.summary}>
+                        已平倉 {sum.closed} 筆（勝 {sum.wins}）· 點數合計 {sum.points}（含滑價）· 手續費＋期交稅 {money(sum.cost)} · 成本後合計 {money(sum.net)}（虛擬）
+                        · 時間：成交與開盤出場記該 1m 開盤時刻，停損／停利記觸價那根 1m 的區間（與事件表同一時間軸）
+                    </div>
+                )}
                 <div className={s.tableWrap}>
                     <table className={s.table}>
                         {tab === 'events' && (
                             <>
-                                <thead><tr><th>時間</th><th>類型</th><th>內容</th><th>ID</th></tr></thead>
+                                <thead><tr><th>時間（實際發生）</th><th>類型</th><th>內容</th><th>ID</th></tr></thead>
                                 <tbody>
                                     {[...res.events].reverse().map((e, i) => (
                                         <tr key={i}><td>{wallTime(e.time)}</td><td>{e.kind}</td><td>{e.text}</td><td>{e.ref}</td></tr>
@@ -471,14 +512,21 @@ function AuditDialog({ res, config, onClose }: { res: TrendSignalResult; config:
                         )}
                         {tab === 'trades' && (
                             <>
-                                <thead><tr><th>成交</th><th>方向</th><th>口數</th><th>成交價</th><th>停損／R</th><th>出場</th><th>已實現（虛擬）</th></tr></thead>
+                                <thead>
+                                    <tr>
+                                        <th>成交（開盤）</th><th>方向</th><th>口數</th><th>成交價</th><th>停損／R</th><th>出場</th>
+                                        <th>點數（含滑價）</th><th>手續費＋期交稅</th><th>成本後損益（虛擬）</th>
+                                    </tr>
+                                </thead>
                                 <tbody>
                                     {[...res.trades].reverse().map((t) => (
                                         <tr key={t.id}>
-                                            <td>{wallTime(t.fillTime - 60)}（{MODE_TEXT[t.entryMode]}）</td><td>{t.direction === 'LONG' ? '多' : '空'}</td><td>{t.qty}</td><td>{t.fillPrice}</td>
+                                            <td>{wallTime(t.fillAt)}（{MODE_TEXT[t.entryMode]}）</td><td>{t.direction === 'LONG' ? '多' : '空'}</td><td>{t.qty}</td><td>{t.fillPrice}</td>
                                             <td>{t.plan.stop}／{t.plan.riskPoints} 點</td>
-                                            <td>{t.fills.map((f) => `${exitText(f.reason)} ${f.qty}@${f.price}（${hm(f.time)}）`).join('；') || '持有中'}</td>
-                                            <td>{t.realizedPoints} 點</td>
+                                            <td>{t.fills.map((f) => `${exitText(f.reason)} ${f.qty}@${f.price}（${fillAtText(f)}）`).join('；') || '持有中'}</td>
+                                            <td>{t.realizedPoints}</td>
+                                            <td>{money(t.costNtd)}</td>
+                                            <td>{money(t.realizedNtd)}{t.status === 'OPEN' ? '（部分）' : ''}</td>
                                         </tr>
                                     ))}
                                 </tbody>

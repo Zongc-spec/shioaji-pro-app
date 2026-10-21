@@ -17,7 +17,7 @@ const raw = walkBars(labels, 7, { regime: 120 });
 const m5: TfSeries = buildTf(raw, 5, 'FUT', Infinity);
 const bars5 = m5.bars;
 const params = (algo: TrendAlgoId): TrendParams => ({ ...DEFAULT_CONFIG.trend, algo });
-const series = (b: Candle[]): TfSeries => ({ tf: 5, bars: b, lastMinute: b.map((x) => x.time), session: b.map(() => ''), sessionEnd: b.map(() => Infinity) });
+const series = (b: Candle[]): TfSeries => ({ tf: 5, bars: b, lastMinute: b.map((x) => x.time), session: b.map(() => ''), sessionEnd: b.map(() => Infinity), missing: b.map(() => 0) });
 
 describe('A10 數值對照', () => {
     it('SuperTrend 方向與線值等於既有 supertrend()（暖身後）', () => {

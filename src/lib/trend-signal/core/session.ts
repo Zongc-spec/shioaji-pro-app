@@ -52,3 +52,12 @@ export function isSessionOpen(secType: SecurityType, t: number): boolean {
     if (wd === 0 || wd === 6) return false;
     return t > s.start && t <= s.end;
 }
+
+/** 1m label 是否為正規交易分鐘（期貨日盤 08:46–13:45、夜盤 15:01–05:00；不含收盤定盤寬限與週末）。
+ *  週期 K 棒的完整性以它為準：桶內每個正規分鐘都要有 1m。 */
+export function isRegularMinute(secType: SecurityType, label: number): boolean {
+    const w = sessionWindowFor(secType, label);
+    if (!(label > w.start && label <= w.end)) return false;
+    const wd = new Date(w.start * 1000).getUTCDay();
+    return wd !== 0 && wd !== 6;
+}

@@ -20,3 +20,8 @@ export function fetchChartHistory(): Promise<KBars> {
     data ??= fetch('/__tsp_demo_data.json').then((r) => r.json()).then((j: KBars | null) => j ?? synthetic());
     return data;
 }
+/** 同正式版：資料＋請求時刻（回放時鐘，main.tsx 把 Date.now 固定在 replayAt 附近） */
+export function fetchChartHistoryStamped(): Promise<{ kbars: KBars; requestedAt: number }> {
+    const requestedAt = Date.now();
+    return fetchChartHistory().then((kbars) => ({ kbars, requestedAt }));
+}

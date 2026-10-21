@@ -88,6 +88,17 @@ export interface TfSeries {
     session: string[];
     /** 該根所屬交易時段的收盤 label */
     sessionEnd: number[];
+    /** 該根缺少的正規交易分鐘數（0 = 完整；1m 恆為 0） */
+    missing: number[];
+}
+
+/** 資料不完整而排除的週期 K 棒（不產生任何訊號、提示或虛擬進場） */
+export interface DataGap {
+    tf: TfMinutes;
+    /** 收盤 label */
+    label: number;
+    /** 缺少的 1m 根數 */
+    missing: number;
 }
 
 // ---- trend ----
@@ -122,6 +133,9 @@ export interface SignalNotes {
     /** 訊號當時已知的最後一根 15m／60m 不是前一個桶（換盤、缺資料） */
     m15Stale: boolean;
     m60Stale: boolean;
+    /** 那一根 15m／60m 缺少 1m（只標示） */
+    m15Incomplete: boolean;
+    m60Incomplete: boolean;
 }
 
 /** 5m 趨勢切換（主訊號）。只含訊號當時已知的資訊，產生後不再改變。 */
@@ -216,7 +230,10 @@ export type ExitReason =
     | 'TREND_INVALID';
 
 export interface TradeFill {
+    /** 成交所在 1m K 棒的收盤 label */
     time: number;
+    /** 在那根 K 棒的哪裡成交：open＝開盤（時刻 label − 60）；intrabar＝盤中觸價（label − 60 到 label 之間） */
+    at: 'open' | 'intrabar';
     price: number;
     qty: number;
     reason: ExitReason;
@@ -240,6 +257,8 @@ export interface VirtualTrade {
     signalTime: number;
     /** 成交所在的 1m K 棒 label（以其開盤價虛擬成交） */
     fillTime: number;
+    /** 實際成交時刻＝那根 K 棒的開盤（fillTime − 60） */
+    fillAt: number;
     fillPrice: number;
     plan: RiskPlan;
     qty: number;
@@ -254,18 +273,22 @@ export interface VirtualTrade {
     status: 'OPEN' | 'CLOSED';
     exitReason: ExitReason | null;
     closedAt: number | null;
-    /** 已實現點數 × 口數（未扣成本） */
+    /** 已實現點數 × 口數（滑價已反映在成交價；未扣手續費與期交稅） */
     realizedPoints: number;
-    /** 已實現損益（扣手續費與期交稅；滑價已反映在成交價） */
+    /** 已出場部分的手續費＋期交稅（新臺幣） */
+    costNtd: number;
+    /** 已實現損益＝點數 × 每點價值 − costNtd */
     realizedNtd: number;
     warnings: string[];
 }
 
 /** SIGNAL 5m 切換、INVALID 5m 失效、ENTRY 1m 提示（風控採用的模式）、PLAN 虛擬風控
- *  接受提示並排定下一根開盤成交、其餘為虛擬部位的生命週期 */
-export type AuditKind = 'SIGNAL' | 'INVALID' | 'ENTRY' | 'PLAN' | 'FILL' | 'EXIT' | 'STOP_MOVE' | 'TARGET' | 'WARN';
+ *  接受提示並排定下一根開盤成交、DATA 資料不完整（排除的 K 棒）、其餘為虛擬部位的生命週期 */
+export type AuditKind = 'SIGNAL' | 'INVALID' | 'ENTRY' | 'PLAN' | 'FILL' | 'EXIT' | 'STOP_MOVE' | 'TARGET' | 'WARN' | 'DATA';
 
 export interface AuditEvent {
+    /** 事件發生的時刻：收棒事件＝收盤 label；開盤成交、開盤生效的停損＝該 1m 開盤（label − 60）；
+     *  盤中觸價＝該 1m 收盤 label（觸價發生在那根之內） */
     time: number;
     kind: AuditKind;
     ref: string;
@@ -292,6 +315,8 @@ export interface TfSnapshot {
     keyLow: number | undefined;
     /** 盤中且最後一根不是前一個桶（換盤後尚未收第一根、資料缺洞） */
     stale: boolean;
+    /** 最後一根缺少 1m（15m／60m 只標示；5m 不完整的桶已排除） */
+    incomplete: boolean;
 }
 
 export interface TrendSignalSnapshot {
@@ -303,6 +328,8 @@ export interface TrendSignalSnapshot {
     signal: TrendSignal | null;
     /** 最新訊號之後的 5m 失效事件（目前為 NEUTRAL 的起點） */
     invalid: TrendInvalidation | null;
+    /** 30 分鐘內因資料不完整而排除的最後一根 5m */
+    recentGap: DataGap | null;
     /** 最新一段 5m 趨勢在各進場模式的狀態（只含有計算的模式） */
     entries: Partial<Record<EntryMode, EntryModeState>>;
     /** 15m 與 60m 都與 5m 反向 */
@@ -356,6 +383,8 @@ export interface TrendSignalResult {
     ema5: (number | undefined)[];
     signals: TrendSignal[];
     invalidations: TrendInvalidation[];
+    /** 資料不完整而排除的 5m（不參與趨勢計算、不產生任何事件） */
+    gaps: DataGap[];
     entries: EntryEvent[];
     trades: VirtualTrade[];
     events: AuditEvent[];

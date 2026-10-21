@@ -11,6 +11,8 @@ export interface TfAt {
     state: TrendState;
     barTime: number | null;
     stale: boolean;
+    /** 那一根缺少正規交易分鐘（高週期只標示，不排除） */
+    incomplete: boolean;
 }
 
 export function tfAt(series: TfSeries, track: TrendTrack, t: number): TfAt {
@@ -21,5 +23,6 @@ export function tfAt(series: TfSeries, track: TrendTrack, t: number): TfAt {
         state: index >= 0 ? track.dir[index]! : 'UNKNOWN',
         barTime,
         stale: !freshAt(barTime, t, series.tf),
+        incomplete: index >= 0 && series.missing[index]! > 0,
     };
 }

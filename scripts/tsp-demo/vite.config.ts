@@ -1,6 +1,7 @@
 // scripts/tsp-demo/vite.config.ts — dev-only Trend Signal Pro 展示頁（畫面驗收與截圖，不需 sidecar）：
 //   TSP_DEMO_DATA=<kbars JSON> pnpm exec vite --config scripts/tsp-demo/vite.config.ts --port 5298
-// 開啟 /?theme=dark&replayAt=2026-08-26T23:59:40&mini=1（自訂指標版：&only=custom、1m 主圖：&tf=1m）。
+// 開啟 /?theme=dark&replayAt=2026-08-26T23:59:40&mini=1（自訂指標版：&only=custom、1m 主圖：&tf=1m、
+// 審計視窗：&audit=trades）。
 // 主圖、指標與面板都是正式元件；
 // 只有歷史來源、帳戶、行情 hook 與下單模組換成 stub — 畫面上任何操作都送不出委託。
 // TSP_DEMO_DATA 未設定時用合成資料。資料檔不進 repo。Never part of a build.

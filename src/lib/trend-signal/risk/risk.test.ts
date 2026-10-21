@@ -139,7 +139,7 @@ const sig = (kind: 'BUY' | 'SELL', index: number, barTime: number, sessionEnd = 
     close: 100,
     line: undefined,
     atr: undefined,
-    notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null, m15Stale: false, m60Stale: false },
+    notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null, m15Stale: false, m60Stale: false, m15Incomplete: false, m60Incomplete: false },
 });
 const entry = (s: TrendSignal, barTime = s.barTime, refPrice = 100, seq = 1): EntryEvent => ({
     id: `${s.id}|IMMEDIATE|${barTime}`,
@@ -189,10 +189,11 @@ describe('虛擬部位', () => {
     });
     it('保護性停損觸價即出；跳空穿過停損以開盤價 − 滑價成交', () => {
         const hit = run(scenario([[100, 105, 95, 100], [100, 100, 70, 75]]), [BUY], [entry(BUY)]).trades[0]!;
-        expect(hit.fills).toEqual([{ time: t0 + 2520, price: 70, qty: 1, reason: 'STOP' }]);
+        expect(hit.fills).toEqual([{ time: t0 + 2520, at: 'intrabar', price: 70, qty: 1, reason: 'STOP' }]);
         expect(hit.realizedNtd).toBe((70 - 101) * 10 - 24);
+        expect(hit.costNtd).toBe(24);
         const gap = run(scenario([[100, 105, 95, 100], [60, 65, 55, 60]]), [BUY], [entry(BUY)]).trades[0]!;
-        expect(gap.fills[0]).toMatchObject({ price: 59, reason: 'STOP' });
+        expect(gap.fills[0]).toMatchObject({ price: 59, reason: 'STOP', at: 'open' });
     });
     it('+1R 到價後，保本停損從下一根開始生效', () => {
         const v = run(scenario([[100, 105, 95, 100], [100, 135, 100, 130], [120, 125, 105, 110]]), [BUY], [entry(BUY)]);
@@ -210,7 +211,7 @@ describe('虛擬部位', () => {
     });
     it('2 口：+2R 出 1 口、啟動移動停損，其餘續抱', () => {
         const vt = run(scenario([[100, 105, 95, 100], [100, 165, 100, 160]]), [BUY], [entry(BUY)], { cfg: { qty: 2, budget: 100000 } }).trades[0]!;
-        expect(vt.fills).toEqual([{ time: t0 + 2520, price: 161, qty: 1, reason: 'TP2R' }]);
+        expect(vt.fills).toEqual([{ time: t0 + 2520, at: 'intrabar', price: 161, qty: 1, reason: 'TP2R' }]);
         expect(vt).toMatchObject({ openQty: 1, trailing: true, status: 'OPEN' });
     });
     it('規格案例 2：5m 確認反向 → 下一根 1m 開盤平倉，不等 1m；平倉本身不開反向部位', () => {
@@ -219,7 +220,7 @@ describe('虛擬部位', () => {
         const dirs: TrendState[] = [...Array(8).fill('LONG'), 'SHORT'];
         const v = run(m1, [BUY, SELL], [entry(BUY)], { dirs });
         expect(v.trades).toHaveLength(1);
-        expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, price: 97, qty: 1, reason: 'REVERSAL' }]);
+        expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, at: 'open', price: 97, qty: 1, reason: 'REVERSAL' }]);
         // 反向訊號有自己的進場事件時，才在同一根開盤以獨立紀錄進場
         const v2 = run(m1, [BUY, SELL], [entry(BUY), entry(SELL)], { dirs });
         expect(v2.trades.map((t) => [t.direction, t.fillTime])).toEqual([['LONG', t0 + 2460], ['SHORT', t0 + 2760]]);
@@ -252,16 +253,36 @@ describe('虛擬部位', () => {
         expect(v.trades).toHaveLength(1);
         expect(v.events.some((e) => e.text.includes('不加碼'))).toBe(true);
     });
+    it('審計時間：開盤成交與開盤出場記該 1m 開盤時刻，盤中觸價記觸價那根 1m 的收盤 label', () => {
+        const v = run(scenario([[100, 105, 95, 100], [100, 100, 70, 75]]), [BUY], [entry(BUY)]);
+        const vt = v.trades[0]!;
+        expect(vt).toMatchObject({ fillTime: t0 + 2460, fillAt: t0 + 2400 });
+        const fill = v.events.find((e) => e.kind === 'FILL')!;
+        expect(fill.time).toBe(vt.fillAt);
+        expect(fill.text).toContain('09:40 開盤');
+        const exit = v.events.find((e) => e.kind === 'EXIT')!;
+        expect(exit.time).toBe(t0 + 2520);
+        expect(exit.text).toContain('09:41–09:42 盤中');
+        // 5m 反向的開盤平倉：事件時間＝該 1m 開盤
+        const m1 = scenario([[100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [98, 105, 95, 100]]);
+        const SELL = sig('SELL', 8, t0 + 2700);
+        const r = run(m1, [BUY, SELL], [entry(BUY)], { dirs: [...Array(8).fill('LONG'), 'SHORT'] });
+        const rev = r.events.find((e) => e.kind === 'EXIT')!;
+        expect(rev.time).toBe(t0 + 2700);
+        expect(rev.text).toContain('09:45 開盤');
+    });
     it('已實現損益扣手續費與期交稅（兩邊各自以成交價計）', () => {
         const hit = run(scenario([[100, 105, 95, 100], [100, 100, 70, 75]]), [BUY], [entry(BUY)], { taxRate: 0.01 }).trades[0]!;
         // 停損 70、進場 101：稅 = round(101 × 10 × 1%) + round(70 × 10 × 1%) = 10 + 7
         expect(hit.realizedNtd).toBe((70 - 101) * 10 - 24 - 17);
+        expect(hit.costNtd).toBe(24 + 17);
+        expect(hit.realizedNtd).toBe(hit.realizedPoints * 10 - hit.costNtd);
     });
     it('5m 趨勢失效（→ NEUTRAL）→ 下一根 1m 開盤平倉，不等 1m', () => {
         const m1 = scenario([[100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [98, 105, 95, 100]]);
         const inv: TrendInvalidation = { id: 'inv-8', barTime: t0 + 2700, index: 8, from: 'LONG' };
         const v = run(m1, [BUY], [entry(BUY)], { dirs: [...Array(8).fill('LONG'), 'NEUTRAL'], invalidations: [inv] });
-        expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, price: 97, qty: 1, reason: 'TREND_INVALID' }]);
+        expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, at: 'open', price: 97, qty: 1, reason: 'TREND_INVALID' }]);
         // 反方向的失效（空方失效）與多單無關
         const other = run(m1, [BUY], [entry(BUY)], { invalidations: [{ ...inv, from: 'SHORT' }] });
         expect(other.trades[0]!.status).toBe('OPEN');

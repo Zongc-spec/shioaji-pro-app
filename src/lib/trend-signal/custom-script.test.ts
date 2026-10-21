@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCustom, type BarsInput } from '../custom-runtime';
 import type { Candle } from '../types/market';
-import { aggregate } from '../utils/kbars';
+import { aggregate, wallClockToUtc } from '../utils/kbars';
 import { DEFAULT_CONFIG } from './config';
 import { lastAtOrBefore } from './core/bars';
 import { runTrendSignal } from './engine';
@@ -34,14 +34,16 @@ const toInput = (bars: Candle[]): BarsInput => ({
     close: bars.map((b) => b.close),
     volume: bars.map((b) => b.volume),
 });
-/** 腳本的 asOf ＝ 台灣牆鐘「現在」− 10 秒：把系統時間設成讓它等於指定的牆鐘秒 */
-const setAsOf = (asOf: number) => vi.setSystemTime((asOf + 10 - 8 * 3600) * 1000);
+/** 把系統時間設成台灣牆鐘 now（腳本用它判斷該盤是否已收盤） */
+const setNow = (now: number) => vi.setSystemTime((now - 8 * 3600) * 1000);
+/** 收盤（含定盤寬限）之後：最後一根也算收完，與原生 asOf ＝ 同一時刻相同 */
+const closedAt = end + 300;
 const cfgFor = (algo: TrendAlgoId, patch: (c: TrendSignalConfig) => TrendSignalConfig = (c) => c) =>
     patch({ ...structuredClone(DEFAULT_CONFIG), trend: { ...DEFAULT_CONFIG.trend, algo } });
 const native = (config: TrendSignalConfig, bars = m1, asOf = end): TrendSignalResult =>
     runTrendSignal({ bars1m: bars, asOf, securityType: 'FUT', symbol: 'TMFR1', contractMonth: '202609', tick: 1, pointValue: 10, config });
-function script(bars: Candle[], params: Record<string, number>, asOf: number) {
-    setAsOf(asOf);
+function script(bars: Candle[], params: Record<string, number>, now: number) {
+    setNow(now);
     const r = runCustom(SOURCE, toInput(bars), params);
     if (r.error) throw new Error(r.error);
     expect(r.order).toEqual(KEYS);
@@ -76,12 +78,12 @@ afterEach(() => {
 
 describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
     const config = cfgFor(algo);
-    const res = native(config);
+    const res = native(config, m1, closedAt);
 
     it('5m 主圖：趨勢線、BUY／SELL、失效', () => {
         const chart5 = aggregate(m1, 5);
         expect(chart5).toEqual(res.m5.bars);
-        const out = script(chart5, { algo: ALGO_INDEX[algo] }, end);
+        const out = script(chart5, { algo: ALGO_INDEX[algo] }, closedAt);
         chart5.forEach((_, i) => {
             const d = res.t5.dir[i];
             expect(out['多方趨勢線']![i]).toBe(d === 'LONG' ? res.t5.line[i]! : null);
@@ -96,7 +98,7 @@ describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
     });
 
     it('1m 主圖：5m 投影、訊號位置、MICRO_TREND／PRICE_STRUCTURE 提示', () => {
-        const out = script(m1, { algo: ALGO_INDEX[algo] }, end);
+        const out = script(m1, { algo: ALGO_INDEX[algo] }, closedAt);
         expectOneMinuteParity(res, m1, out);
         expect(res.entries.filter((e) => e.mode === 'MICRO_TREND').length).toBeGreaterThan(0);
         expect(res.entries.filter((e) => e.mode === 'PRICE_STRUCTURE').length).toBeGreaterThan(0);
@@ -105,8 +107,8 @@ describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
 
 describe('其他設定與邊界', () => {
     it('post-flip 窗口（hintWindow = 3 根 5m）', () => {
-        const res = native(cfgFor('supertrend', (c) => ({ ...c, entry: { ...c.entry, windowBars: 3 } })));
-        expectOneMinuteParity(res, m1, script(m1, { hintWindow: 3 }, end));
+        const res = native(cfgFor('supertrend', (c) => ({ ...c, entry: { ...c.entry, windowBars: 3 } })), m1, closedAt);
+        expectOneMinuteParity(res, m1, script(m1, { hintWindow: 3 }, closedAt));
     });
 
     it('非預設參數：Donchian(10)＋ATR×2、1m Donchian(10)、結構轉折 3／2、最小回檔 1 ATR', () => {
@@ -114,26 +116,44 @@ describe('其他設定與邊界', () => {
             ...c,
             trend: { ...c.trend, dcLength: 10, dcAtrMult: 2 },
             entry: { ...c.entry, microDcLength: 10, pivotLeft: 3, pivotRight: 2, minPullbackAtr: 1 },
-        })));
+        })), m1, closedAt);
         const params = { algo: 1, dcLength: 10, dcAtrMult: 2, microDcLength: 10, pivotLeft: 3, pivotRight: 2, minPullbackAtr: 1 };
-        expectOneMinuteParity(res, m1, script(m1, params, end));
+        expectOneMinuteParity(res, m1, script(m1, params, closedAt));
         expect(res.invalidations.length).toBeGreaterThan(0);
     });
 
-    it('進行中的 K 棒（收盤時間 > 現在 − 10 秒）不產生訊號與提示：與原生在同一時點相同', () => {
+    it('進行中的 K 棒（後面還沒有下一根、也還沒收盤）不產生訊號與提示：與原生在同一時點相同', () => {
         for (const k of [900, 1555, 2210]) {
             const bars = m1.slice(0, k + 2); // 第 k+1 根是進行中的 1m
             const asOf = labels[k]! + 20;
             const res = native(cfgFor('supertrend'), bars, asOf);
             expect(res.m1.bars).toHaveLength(k + 1);
-            const out = script(bars, {}, asOf);
+            const out = script(bars, {}, asOf + 10);
             expectOneMinuteParity(res, bars, out);
             for (const key of ['BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示']) expect(out[key]![k + 1]).toBeNull();
         }
     });
 
+    it('缺分鐘的 5m 一樣排除（審查 P1：13:10 只剩 13:06）', () => {
+        const drop = new Set(['13:07', '13:08', '13:09', '13:10'].map((hm) => wallClockToUtc(`2026-09-02T${hm}:00`)));
+        const gapped = m1.filter((b) => !drop.has(b.time));
+        const res = native(cfgFor('supertrend'), gapped, closedAt);
+        expect(res.gaps).toHaveLength(1);
+        expectOneMinuteParity(res, gapped, script(gapped, {}, closedAt));
+    });
+
+    it('5m 桶內缺 1m 之後一樣不提示（2026-09-03 缺 12:28，12:29 的微型提示消失）', () => {
+        const t = (hm: string) => wallClockToUtc(`2026-09-03T${hm}:00`);
+        const gapped = m1.filter((b) => b.time !== t('12:28'));
+        const before = native(cfgFor('supertrend'), m1, closedAt);
+        const res = native(cfgFor('supertrend'), gapped, closedAt);
+        expect(before.entries.some((e) => e.mode === 'MICRO_TREND' && e.barTime === t('12:29'))).toBe(true);
+        expect(res.entries.some((e) => e.barTime === t('12:29'))).toBe(false);
+        expectOneMinuteParity(res, gapped, script(gapped, {}, closedAt));
+    });
+
     it('驗證用的 300 根 1m 樣本可執行（編輯器驗證只要求 plot() 有輸出）', () => {
-        const out = script(m1.slice(0, 300), {}, end);
+        const out = script(m1.slice(0, 300), {}, closedAt);
         expect(Object.keys(out)).toEqual(KEYS);
     });
 });

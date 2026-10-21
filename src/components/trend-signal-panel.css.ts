@@ -155,6 +155,8 @@ export const tabs = style({ display: 'flex', gap: '4px', padding: '6px 10px', bo
 
 export const tableWrap = style({ flex: 1, overflow: 'auto', padding: '0 10px 10px' });
 
+export const summary = style({ padding: '6px 10px', color: vars.color.mutedForeground, borderBottom: `1px solid ${vars.color.border}` });
+
 export const table = style({
     width: '100%',
     borderCollapse: 'collapse',

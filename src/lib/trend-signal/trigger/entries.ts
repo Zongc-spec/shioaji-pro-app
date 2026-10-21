@@ -16,6 +16,8 @@ export interface EntryInputs {
     m1: Candle[];
     m1Session: string[];
     m1SessionEnd: number[];
+    /** 每根 1m 所屬 5m 桶在它之前是否已缺 1m */
+    m1Hole: boolean[];
     /** 已收 5m 與其 TrendCore 狀態 */
     m5: Candle[];
     dir5: TrendState[];
@@ -44,7 +46,7 @@ export function computeEntries(inp: EntryInputs): EntryOutput {
     let seg: TrendSegment | null = null;
     let latest: [EntryMode, ModeResult][] = [];
     for (const sig of signals) {
-        seg = trendSegment(sig, { m1, m1SessionEnd: inp.m1SessionEnd, m5: inp.m5, dir5: inp.dir5, windowBars: p.windowBars });
+        seg = trendSegment(sig, { m1, m1SessionEnd: inp.m1SessionEnd, m1Hole: inp.m1Hole, m5: inp.m5, dir5: inp.dir5, windowBars: p.windowBars });
         latest = [
             ['IMMEDIATE', immediateHints(seg, inp.key)],
             ['MICRO_TREND', microTrendHints(seg, m1, inp.micro, inp.key)],
@@ -55,6 +57,7 @@ export function computeEntries(inp: EntryInputs): EntryOutput {
     }
     const closed = segmentClosed(seg!, asOf, p.windowBars);
     const fresh = freshAt(inp.m5[inp.m5.length - 1]?.time, asOf, 5);
+    const hole = inp.m1Hole[m1.length - 1] === true;
     const states: Partial<Record<EntryMode, EntryModeState>> = {};
     for (const [mode, r] of latest) {
         states[mode] = {
@@ -62,7 +65,9 @@ export function computeEntries(inp: EntryInputs): EntryOutput {
             active: closed === null,
             hints: r.hints.length,
             last: r.hints[r.hints.length - 1] ?? null,
-            waiting: closed ?? (fresh ? r.waiting : '5m 狀態過期（換盤或缺資料），等待下一根 5m 收棒'),
+            waiting: closed ?? (!fresh
+                ? '5m 狀態過期（換盤或缺資料），等待下一根 5m 收棒'
+                : hole ? '這根 5m 已缺 1m（資料不完整），等待下一根完整的 5m 收棒' : r.waiting),
         };
     }
     return { entries, states };

@@ -1,14 +1,18 @@
 // src/lib/trend-signal/engine.test.ts — 整合驗收：A2 回放不重繪、A3 每次切換一個事件、A6 模組獨立、
 // A8 週期切換不漂移、A9 確定性、三個 TrendCore 都能跑；Gate 1 的資料缺洞、歷史回補、隔夜；
-// Gate 2 的 1m 提示只在 5m 同向且未過期時出現；規格必驗案例 1（沒有提示不進場）、
+// Gate 2 的 1m 提示只在 5m 同向且未過期時出現；P1 回歸（資料不完整的 5m 不產生事件、桶內缺 1m 之後不提示）；
+// 規格必驗案例 1（沒有提示不進場）、
 // 2（5m 反向／失效立即平倉）、4（未收完的 K 棒臨時反轉不產生訊號）。
 import { describe, expect, it } from 'vitest';
-import { aggregate } from '../utils/kbars';
-import { configFromParams, DEFAULT_CONFIG } from './config';
-import { firstAfter, freshAt, lastAtOrBefore } from './core/bars';
+import { aggregate, wallClockToUtc } from '../utils/kbars';
+import { configFromParams, DEFAULT_CONFIG, entryKey } from './config';
+import { buildTf, confirmed1m, firstAfter, freshAt, lastAtOrBefore } from './core/bars';
 import { runTrendSignal } from './engine';
 import { sessionLabels, walkBars } from './fixtures.test-harness';
 import { chartBucket, GAP_COLOR, projectLines, projectMarkers, splitTrendLines } from './project';
+import { switchAt, trendTrack } from './trend/signals';
+import { microTrendHints } from './trigger/modes';
+import { trendSegment } from './trigger/window';
 import type { TrendAlgoId, TrendSignal, TrendSignalConfig, TrendSignalInput, TrendSignalResult } from './types';
 
 const labels = sessionLabels('2026-09-01', 4);
@@ -162,6 +166,64 @@ describe('Gate 2：1m 提示只在 5m 同向、未過期時出現（不與 5m BU
             expect(e.barTime).toBeLessThanOrEqual(Math.min(s.barTime + 900, s.sessionEnd));
         }
         expect(r.entries.length).toBeLessThan(full.entries.length);
+    });
+});
+
+describe('P1 回歸：資料不完整的 5m 不產生任何事件', () => {
+    // 審查發現（V1.1 933d165）：5m 桶只有一根 1m 仍被當成有效 5m，產生 BUY／SELL、提示與虛擬進場計畫。
+    // 這份資料上 2026-09-02 13:10 的桶只留 13:06 時，舊行為會在 13:10 翻成 SELL（並有 2 個提示）。
+    const T13 = (hm: string) => wallClockToUtc(`2026-09-02T${hm}:00`);
+    const drop = new Set(['13:07', '13:08', '13:09', '13:10'].map(T13));
+    const gapped = m1.filter((b) => !drop.has(b.time));
+    const r = runTrendSignal(input({ bars1m: gapped }));
+    it('前提：完整資料在 13:10 沒有訊號；不過濾時單一分鐘的桶會讓 5m 翻成 SELL', () => {
+        expect(full.signals.some((s) => s.barTime === T13('13:10'))).toBe(false);
+        const raw = buildTf(confirmed1m(gapped, end), 5, 'FUT', end);
+        const tr = trendTrack(raw, DEFAULT_CONFIG.trend);
+        const i = raw.bars.findIndex((b) => b.time === T13('13:10'));
+        expect(raw.missing[i]).toBe(4);
+        expect(switchAt(tr.dir, i)).toBe('SELL');
+    });
+    it('修正後：13:10 被排除（資料缺口事件），沒有訊號、提示或虛擬進場', () => {
+        expect(r.gaps).toEqual([{ tf: 5, label: T13('13:10'), missing: 4 }]);
+        expect(r.m5.bars.some((b) => b.time === T13('13:10'))).toBe(false);
+        expect(r.signals.some((s) => s.barTime === T13('13:10'))).toBe(false);
+        expect(r.events.some((e) => e.kind === 'DATA' && e.time === T13('13:10') && e.text.includes('缺 4 根 1m'))).toBe(true);
+        // 缺口之後到下一根完整 5m 收盤前，5m 狀態過期：1m 不提示，也就沒有虛擬進場
+        const after = (t: number) => t > T13('13:06') && t < T13('13:15');
+        expect(r.entries.some((e) => after(e.barTime))).toBe(false);
+        expect(r.trades.some((t) => after(t.signalTime))).toBe(false);
+    });
+    it('缺口前的訊號、提示與部位不受影響', () => {
+        const before = (t: number) => t < T13('13:06');
+        expect(r.signals.filter((s) => before(s.barTime))).toEqual(full.signals.filter((s) => before(s.barTime)));
+        expect(r.entries.filter((e) => before(e.barTime))).toEqual(full.entries.filter((e) => before(e.barTime)));
+    });
+});
+
+describe('P1 回歸：5m 桶內缺 1m 之後的 1m 不提示', () => {
+    // 同一類問題：缺口所在的 5m 已排除，但同一個桶內、缺口之後的 1m 仍會用不完整的資料提示。
+    // 這份資料 2026-09-03 12:29 有 MICRO_TREND 提示（風控採用 MICRO_TREND 時成交）；拿掉 12:28 後它落在缺口之後。
+    const T9 = (hm: string) => wallClockToUtc(`2026-09-03T${hm}:00`);
+    const micro = cfg((c) => ({ ...c, entry: { ...c.entry, mode: 'MICRO_TREND' } }));
+    const base = runTrendSignal(input({ config: micro }));
+    const r = runTrendSignal(input({ bars1m: m1.filter((b) => b.time !== T9('12:28')), config: micro }));
+    const hint = base.entries.find((e) => e.mode === 'MICRO_TREND' && e.barTime === T9('12:29'))!;
+    it('前提：完整資料 12:29 有提示並成交；缺 12:28 時若不略過，12:29 仍會提示', () => {
+        expect(hint).toBeDefined();
+        expect(base.trades.some((t) => t.entryId === hint.id)).toBe(true);
+        const sig = r.signals.find((s) => s.id === hint.signalId)!;
+        const seg = trendSegment(sig, { m1: r.m1.bars, m1SessionEnd: r.m1.sessionEnd, m1Hole: r.m1.bars.map(() => false), m5: r.m5.bars, dir5: r.t5.dir, windowBars: 0 });
+        expect(microTrendHints(seg, r.m1.bars, r.t1.dir, entryKey(micro)).hints.some((h) => h.barTime === T9('12:29'))).toBe(true);
+    });
+    it('修正後：12:30 的 5m 排除；缺口之後到下一根完整 5m（12:35）收盤前都不提示，也沒有虛擬進場', () => {
+        expect(r.gaps).toEqual([{ tf: 5, label: T9('12:30'), missing: 1 }]);
+        expect(r.entries.some((e) => e.barTime > T9('12:27') && e.barTime < T9('12:35'))).toBe(false);
+        expect(r.trades.some((t) => t.entryId === hint.id)).toBe(false);
+    });
+    it('缺口之前的提示不變', () => {
+        const before = (t: number) => t <= T9('12:27');
+        expect(r.entries.filter((e) => before(e.barTime))).toEqual(base.entries.filter((e) => before(e.barTime)));
     });
 });
 

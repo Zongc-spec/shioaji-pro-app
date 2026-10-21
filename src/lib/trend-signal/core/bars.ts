@@ -8,8 +8,8 @@ import type { IndicatorPoint } from '../../indicators';
 import type { SecurityType } from '../../types/contract';
 import type { Candle } from '../../types/market';
 import { aggregate } from '../../utils/kbars';
-import { tradingSessionOf, type TradingSession } from './session';
-import type { TfMinutes, TfSeries } from '../types';
+import { isRegularMinute, tradingSessionOf, type TradingSession } from './session';
+import type { DataGap, TfMinutes, TfSeries } from '../types';
 
 /** label ≤ asOf 的 1m K 棒才算已收。回傳新陣列：未排序或 label 重複
  *  （後者覆蓋前者）的輸入先正規化。 */
@@ -34,7 +34,8 @@ function normalize(bars: Candle[]): Candle[] {
 }
 
 /** 由已收 1m 建立某週期的已收 K 棒。最後一個桶只有在 label ≤ asOf，
- *  或其所屬時段已收盤（含 CLOSE_GRACE）時才保留。 */
+ *  或其所屬時段已收盤（含 CLOSE_GRACE）時才保留。每根記下缺少的正規交易分鐘數
+ *  （完整性；用 completeOnly() 排除不完整的桶）。 */
 export function buildTf(
     m1: Candle[],
     tf: TfMinutes,
@@ -52,12 +53,13 @@ export function buildTf(
     };
     if (tf === 1) {
         const ss = m1.map((b) => sessionOf(b.time));
-        return { tf, bars: m1, lastMinute: m1.map((b) => b.time), session: ss.map((s) => s.key), sessionEnd: ss.map((s) => s.end) };
+        return { tf, bars: m1, lastMinute: m1.map((b) => b.time), session: ss.map((s) => s.key), sessionEnd: ss.map((s) => s.end), missing: m1.map(() => 0) };
     }
     const bars = aggregate(m1, tf);
-    // 與 aggregate() 同一個收盤 label 公式，逐桶記下最後一根 1m
+    // 與 aggregate() 同一個收盤 label 公式，逐桶記下最後一根 1m 與實際有的正規分鐘數
     const sec = tf * 60;
     const lastMinute: number[] = [];
+    const present: number[] = [];
     let j = -1;
     let cur = Number.NaN;
     for (const c of m1) {
@@ -65,9 +67,16 @@ export function buildTf(
         if (bucket !== cur) {
             cur = bucket;
             j += 1;
+            present[j] = 0;
         }
         lastMinute[j] = c.time;
+        if (isRegularMinute(secType, c.time)) present[j]! += 1;
     }
+    const missing = bars.map((b, k) => {
+        let expected = 0;
+        for (let t = b.time - sec + 60; t <= b.time; t += 60) if (isRegularMinute(secType, t)) expected++;
+        return Math.max(0, expected - present[k]!);
+    });
     const ss = lastMinute.map((t) => sessionOf(t));
     const session = ss.map((s) => s.key);
     const sessionEnd = ss.map((s) => s.end);
@@ -80,9 +89,48 @@ export function buildTf(
             lastMinute.pop();
             session.pop();
             sessionEnd.pop();
+            missing.pop();
         }
     }
-    return { tf, bars, lastMinute, session, sessionEnd };
+    return { tf, bars, lastMinute, session, sessionEnd, missing };
+}
+
+/** 只留完整的桶（每個正規交易分鐘都有 1m）；排除的桶不參與趨勢計算，也不產生任何事件。
+ *  缺分鐘可能是斷線、上游缺料，也可能是冷清時段真的沒有成交 — 無法分辨時一律保守排除。 */
+export function completeOnly(s: TfSeries): { series: TfSeries; gaps: DataGap[] } {
+    const keep: number[] = [];
+    const gaps: DataGap[] = [];
+    s.bars.forEach((b, i) => {
+        if (s.missing[i]! > 0) gaps.push({ tf: s.tf, label: b.time, missing: s.missing[i]! });
+        else keep.push(i);
+    });
+    if (gaps.length === 0) return { series: s, gaps };
+    const pick = <T>(a: T[]) => keep.map((i) => a[i]!);
+    return {
+        series: { tf: s.tf, bars: pick(s.bars), lastMinute: pick(s.lastMinute), session: pick(s.session), sessionEnd: pick(s.sessionEnd), missing: pick(s.missing) },
+        gaps,
+    };
+}
+
+/** 每根 1m 所屬的 tf 桶，在它之前是否已缺正規交易分鐘（只看這根以前，因果）。
+ *  1m 提示略過這些位置：桶內出現缺口後到該桶收盤都不提示，下一個桶再由 freshAt 判定過期。 */
+export function holeBefore(m1: Candle[], secType: SecurityType, tf: TfMinutes = 5): boolean[] {
+    const sec = tf * 60;
+    const out: boolean[] = [];
+    let cur = Number.NaN;
+    let present = 0;
+    for (const c of m1) {
+        const bucket = Math.ceil(c.time / sec) * sec;
+        if (bucket !== cur) {
+            cur = bucket;
+            present = 0;
+        }
+        let expected = 0;
+        for (let t = bucket - sec + 60; t < c.time; t += 60) if (isRegularMinute(secType, t)) expected++;
+        out.push(expected > present);
+        if (isRegularMinute(secType, c.time)) present++;
+    }
+    return out;
 }
 
 /** IndicatorPoint[]（以時間為鍵）→ 與 bars 對齊的陣列 */

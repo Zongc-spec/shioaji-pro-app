@@ -85,6 +85,7 @@ export function standaloneLines(bars: Candle[], tfMinutes: number, cfg: TrendSig
         lastMinute: m5.map((b) => b.time),
         session: m5.map(() => ''),
         sessionEnd: m5.map(() => Number.POSITIVE_INFINITY),
+        missing: m5.map(() => 0),
     }, cfg.trend);
     const ema5 = emaSeries(m5, cfg.note);
     const values: (number | undefined)[] = [];
