@@ -1,14 +1,47 @@
-// Trend Signal Pro tsp-chart-1.2.0 — Web/App 共用計算函式，官方 App 本圖週期自訂指標
+// Trend Signal Pro tsp-app-1.3.0 — Web/App 共用計算函式，官方 App 自訂指標
 // 由 npm run build:tsp-custom 產生；請修改 src/lib/trend-signal 的共用來源。
+// 5m 是主趨勢並判斷進出場，1m 是精準進出場；App 只給主圖本身的 K 棒，所以依主圖週期：
+//   1m 主圖：原模型（由 1m 聚合 5m 主趨勢、1m 精準提示、虛擬風控），與 Web 逐根相同。
+//   5m 主圖：5m 主趨勢與 5m 收棒的進出場（IMMEDIATE）；沒有 1m，不畫 1m 提示，停損以 5m K 棒近似。
+//   15m／60m／日K：只畫該週期趨勢線作高週期輔助，不產生訊號、進出場與風控。
 // 預設明訂微台：tick=1、每點10元、單邊手續費12元、單邊期交稅0.00002；不自動辨識商品或真實持倉。
-// 依目前主圖週期重算；與原固定5m趨勢/1m觸發模型不同。chartTf=0自動推斷，必要時明訂分鐘數。
-// 日K依App提供的日曆日OHLCV、下一根可用日K；沒有正式交易日曆，也不能還原棒內分鐘路徑。
 // 輸出19條：趨勢/提示、初始/目前停損、保本、1R/2R/3R、虛擬進出場；全部為觀察與虛擬計算。
-// 趨勢預設線，只顯示最後一段有效趨勢；目前停損請在App樣式手動選階梯線。
-// 自訂API沒有文字箭頭或階梯預設；點的名稱/價格在圖例滑鼠提示查看，可於樣式啟用價格標籤。
+// 趨勢線只顯示最後一段有效趨勢；目前停損請在App樣式手動選階梯線。
 // 不讀帳密、不連網、不送改撤單；沒有原生Feed的資料凍結、LIVE徽章或完整審計面板。
 // 更新歷史/載入起點/參數變更仍會重算；與Web比對需相同資料、asOf、商品規格與完整設定。
 (function() {
+	//#region src/lib/utils/kbars.ts
+	function aggregate(candles, minutes) {
+		if (minutes <= 1) return candles;
+		const out = [];
+		let cur = null;
+		const bucketSec = minutes * 60;
+		for (const c of candles) {
+			const bucket = minutes >= 1440 ? Math.floor(c.time / 86400) * 86400 : Math.ceil(c.time / bucketSec) * bucketSec;
+			if (!cur || cur.time !== bucket) {
+				if (cur) out.push(cur);
+				cur = {
+					...c,
+					time: bucket
+				};
+			} else {
+				cur.high = Math.max(cur.high, c.high);
+				cur.low = Math.min(cur.low, c.low);
+				cur.close = c.close;
+				cur.volume += c.volume;
+			}
+		}
+		if (cur) out.push(cur);
+		return out;
+	}
+	var TW_OFFSET_SEC = 8 * 3600;
+	function nowWallClockUtc() {
+		return msToWallClockUtc(Date.now());
+	}
+	function msToWallClockUtc(ms) {
+		return Math.floor(ms / 1e3) + TW_OFFSET_SEC;
+	}
+	//#endregion
 	//#region src/lib/indicators.ts
 	function ema(bars, period) {
 		return emaOf(bars.map((b) => ({
@@ -128,6 +161,29 @@
 			down
 		};
 	}
+	function rsi(bars, period = 14) {
+		const gains = [];
+		const losses = [];
+		for (let i = 1; i < bars.length; i++) {
+			const chg = bars[i].close - bars[i - 1].close;
+			gains.push(Math.max(0, chg));
+			losses.push(Math.max(0, -chg));
+		}
+		const avgG = rma(gains, period);
+		const avgL = rma(losses, period);
+		const out = [];
+		for (let i = 0; i < gains.length; i++) {
+			const g = avgG[i];
+			const l = avgL[i];
+			if (g === void 0 || l === void 0) continue;
+			const v = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+			out.push({
+				time: bars[i + 1].time,
+				value: v
+			});
+		}
+		return out;
+	}
 	function stoch(bars, kPeriod = 9, kSmooth = 3, dPeriod = 3) {
 		const rsv = [];
 		for (let i = kPeriod - 1; i < bars.length; i++) {
@@ -194,15 +250,6 @@
 			end: d0 + 13.5 * H,
 			night: false
 		};
-	}
-	//#endregion
-	//#region src/lib/utils/kbars.ts
-	var TW_OFFSET_SEC = 8 * 3600;
-	function nowWallClockUtc() {
-		return msToWallClockUtc(Date.now());
-	}
-	function msToWallClockUtc(ms) {
-		return Math.floor(ms / 1e3) + TW_OFFSET_SEC;
 	}
 	//#endregion
 	//#region src/lib/trend-signal/config.ts
@@ -525,6 +572,7 @@
 		return fingerprint(rest);
 	};
 	var riskKey = (cfg) => fingerprint(cfg.risk);
+	var configKey = (cfg) => `${trendKey(cfg)}.${fingerprint(cfg.note)}.${entryKey(cfg)}.${riskKey(cfg)}`;
 	//#endregion
 	//#region src/lib/trend-signal/core/session.ts
 	var pad = (n) => String(n).padStart(2, "0");
@@ -558,6 +606,14 @@
 			key: `${wallDate(w.start)}${w.night ? "N" : "D"}`
 		};
 	}
+	/** asOf 是否在交易時段內（週末開始的時段不存在；國定假日無從得知，
+	*  由資料延遲判定補上） */
+	function isSessionOpen(secType, t) {
+		const s = tradingSessionOf(secType, t);
+		const wd = (/* @__PURE__ */ new Date(s.start * 1e3)).getUTCDay();
+		if (wd === 0 || wd === 6) return false;
+		return t > s.start && t <= s.end;
+	}
 	/** 1m label 是否為正規交易分鐘（期貨日盤 08:46–13:45、夜盤 15:01–05:00；不含收盤定盤寬限與週末）。
 	*  週期 K 棒的完整性以它為準：桶內每個正規分鐘都要有 1m。 */
 	function isRegularMinute(secType, label) {
@@ -568,6 +624,143 @@
 	}
 	//#endregion
 	//#region src/lib/trend-signal/core/bars.ts
+	/** label ≤ asOf 的 1m K 棒才算已收。回傳新陣列：未排序或 label 重複
+	*  （後者覆蓋前者）的輸入先正規化。 */
+	function confirmed1m(bars, asOf) {
+		let sorted = true;
+		for (let i = 1; i < bars.length; i++) if (bars[i].time <= bars[i - 1].time) {
+			sorted = false;
+			break;
+		}
+		const src = sorted ? bars : normalize(bars);
+		let n = src.length;
+		while (n > 0 && !(src[n - 1].time <= asOf)) n--;
+		return src.slice(0, n);
+	}
+	function normalize(bars) {
+		const byTime = /* @__PURE__ */ new Map();
+		for (const b of bars) byTime.set(b.time, b);
+		return [...byTime.values()].sort((a, b) => a.time - b.time);
+	}
+	/** 由已收 1m 建立某週期的已收 K 棒。最後一個桶只有在 label ≤ asOf，
+	*  或其所屬時段已收盤（含 CLOSE_GRACE）時才保留。每根記下缺少的正規交易分鐘數
+	*  （完整性；用 completeOnly() 排除不完整的桶）。 */
+	function buildTf(m1, tf, secType, asOf) {
+		const sessionOfLabel = /* @__PURE__ */ new Map();
+		const sessionOf = (label) => {
+			let s = sessionOfLabel.get(label);
+			if (s === void 0) {
+				s = tradingSessionOf(secType, label);
+				sessionOfLabel.set(label, s);
+			}
+			return s;
+		};
+		if (tf === 1) {
+			const ss = m1.map((b) => sessionOf(b.time));
+			return {
+				tf,
+				bars: m1,
+				lastMinute: m1.map((b) => b.time),
+				session: ss.map((s) => s.key),
+				sessionEnd: ss.map((s) => s.end),
+				missing: m1.map(() => 0)
+			};
+		}
+		const bars = aggregate(m1, tf);
+		const sec = tf * 60;
+		const lastMinute = [];
+		const present = [];
+		let j = -1;
+		let cur = NaN;
+		for (const c of m1) {
+			const bucket = Math.ceil(c.time / sec) * sec;
+			if (bucket !== cur) {
+				cur = bucket;
+				j += 1;
+				present[j] = 0;
+			}
+			lastMinute[j] = c.time;
+			if (isRegularMinute(secType, c.time)) present[j] += 1;
+		}
+		const missing = bars.map((b, k) => {
+			let expected = 0;
+			for (let t = b.time - sec + 60; t <= b.time; t += 60) if (isRegularMinute(secType, t)) expected++;
+			return Math.max(0, expected - present[k]);
+		});
+		const ss = lastMinute.map((t) => sessionOf(t));
+		const session = ss.map((s) => s.key);
+		const sessionEnd = ss.map((s) => s.end);
+		const n = bars.length;
+		if (n > 0) {
+			const lastLabel = bars[n - 1].time;
+			const closedAt = sessionEnd[n - 1] + 240;
+			if (!(lastLabel <= asOf || asOf >= closedAt)) {
+				bars.pop();
+				lastMinute.pop();
+				session.pop();
+				sessionEnd.pop();
+				missing.pop();
+			}
+		}
+		return {
+			tf,
+			bars,
+			lastMinute,
+			session,
+			sessionEnd,
+			missing
+		};
+	}
+	/** 只留完整的桶（每個正規交易分鐘都有 1m）；排除的桶不參與趨勢計算，也不產生任何事件。
+	*  缺分鐘可能是斷線、上游缺料，也可能是冷清時段真的沒有成交 — 無法分辨時一律保守排除。 */
+	function completeOnly(s) {
+		const keep = [];
+		const gaps = [];
+		s.bars.forEach((b, i) => {
+			if (s.missing[i] > 0) gaps.push({
+				tf: s.tf,
+				label: b.time,
+				missing: s.missing[i]
+			});
+			else keep.push(i);
+		});
+		if (gaps.length === 0) return {
+			series: s,
+			gaps
+		};
+		const pick = (a) => keep.map((i) => a[i]);
+		return {
+			series: {
+				tf: s.tf,
+				bars: pick(s.bars),
+				lastMinute: pick(s.lastMinute),
+				session: pick(s.session),
+				sessionEnd: pick(s.sessionEnd),
+				missing: pick(s.missing)
+			},
+			gaps
+		};
+	}
+	/** 每根 1m 所屬的 tf 桶，在它之前是否已缺正規交易分鐘（只看這根以前，因果）。
+	*  1m 提示略過這些位置：桶內出現缺口後到該桶收盤都不提示，下一個桶再由 freshAt 判定過期。 */
+	function holeBefore(m1, secType, tf = 5) {
+		const sec = tf * 60;
+		const out = [];
+		let cur = NaN;
+		let present = 0;
+		for (const c of m1) {
+			const bucket = Math.ceil(c.time / sec) * sec;
+			if (bucket !== cur) {
+				cur = bucket;
+				present = 0;
+			}
+			let expected = 0;
+			for (let t = bucket - sec + 60; t < c.time; t += 60) if (isRegularMinute(secType, t)) expected++;
+			out.push(expected > present);
+			if (isRegularMinute(secType, c.time)) present++;
+		}
+		return out;
+	}
 	/** IndicatorPoint[]（以時間為鍵）→ 與 bars 對齊的陣列 */
 	function alignPoints(bars, pts) {
 		const at = /* @__PURE__ */ new Map();
@@ -1106,6 +1299,19 @@
 		};
 	}
 	//#endregion
+	//#region src/lib/trend-signal/trend/mtf.ts
+	function tfAt(series, track, t) {
+		const index = lastAtOrBefore(series.bars, t);
+		const barTime = index >= 0 ? series.bars[index].time : null;
+		return {
+			index,
+			state: index >= 0 ? track.dir[index] : "UNKNOWN",
+			barTime,
+			stale: !freshAt(barTime, t, series.tf),
+			incomplete: index >= 0 && series.missing[index] > 0
+		};
+	}
+	//#endregion
 	//#region src/lib/trend-signal/trend/algorithms.ts
 	var SUPERTREND = {
 		id: "supertrend",
@@ -1287,6 +1493,51 @@
 		if (i < 1 || dir[i] !== "NEUTRAL") return null;
 		const prev = dir[i - 1];
 		return prev === "LONG" || prev === "SHORT" ? prev : null;
+	}
+	/** 高週期與 5m 的關係：同向 ALIGN、反向 DIVERGE；任一方沒有方向（NEUTRAL／UNKNOWN）為 NEUTRAL */
+	function alignmentOf(htf, m5) {
+		const known = (d) => d === "LONG" || d === "SHORT";
+		if (!known(htf) || !known(m5)) return "NEUTRAL";
+		return htf === m5 ? "ALIGN" : "DIVERGE";
+	}
+	/** 第 i 根的狀態已持續幾根（含 i）；UNKNOWN 為 null */
+	function trendAge(dir, i) {
+		const d = dir[i];
+		if (i < 0 || d === void 0 || d === "UNKNOWN") return null;
+		let j = i;
+		while (j > 0 && dir[j - 1] === d) j--;
+		return i - j + 1;
+	}
+	/** 最近 n 根已收 K 棒（含 i）的最高價與最低價 */
+	function keyLevels(bars, i, n) {
+		if (i < 0) return null;
+		let high = -Infinity;
+		let low = Infinity;
+		for (let j = Math.max(0, i - n + 1); j <= i; j++) {
+			high = Math.max(high, bars[j].high);
+			low = Math.min(low, bars[j].low);
+		}
+		return Number.isFinite(high) && Number.isFinite(low) ? {
+			high,
+			low
+		} : null;
+	}
+	/** 收盤對 EMA 與 EMA 斜率是否與訊號同向（舊規格 §1.1 的條件，只當註記） */
+	function emaNote(bars, emaV, i, kind, slopeBars) {
+		const e = emaV[i];
+		const ePrev = i >= slopeBars ? emaV[i - slopeBars] : void 0;
+		if (e === void 0 || ePrev === void 0) return "UNKNOWN";
+		const c = bars[i].close;
+		const up = c > e && e > ePrev;
+		const down = c < e && e < ePrev;
+		if (kind === "BUY") return up ? "WITH" : down ? "AGAINST" : "MIXED";
+		return down ? "WITH" : up ? "AGAINST" : "MIXED";
+	}
+	function emaSeries(bars, p) {
+		return alignPoints(bars, ema(bars, p.emaPeriod));
+	}
+	function rsiSeries(bars, p) {
+		return alignPoints(bars, rsi(bars, p.rsiPeriod));
 	}
 	//#endregion
 	//#region src/lib/trend-signal/trigger/window.ts
@@ -1630,6 +1881,215 @@
 		};
 	}
 	//#endregion
+	//#region src/lib/trend-signal/engine.ts
+	function unknownTrack(s, algo) {
+		return {
+			tf: s.tf,
+			algo,
+			line: s.bars.map(() => void 0),
+			dir: s.bars.map(() => "UNKNOWN"),
+			stopLine: false
+		};
+	}
+	/** 最後一根已收 K 棒的狀態（收盤後保留的定盤桶 label 可能晚於 asOf，仍是已收） */
+	function tfSnapshot(s, tr, note, m5Dir, asOf, sessionOpen) {
+		const i = s.bars.length - 1;
+		const bar = i >= 0 ? s.bars[i] : void 0;
+		const dir = i >= 0 ? tr.dir[i] : "UNKNOWN";
+		const tail = s.bars.slice(Math.max(0, i - 299), i + 1);
+		const a = tail.length ? alignPoints(tail, atr(tail, note.atrPeriod))[tail.length - 1] : void 0;
+		const r = tail.length ? rsiSeries(tail, note)[tail.length - 1] : void 0;
+		const line = i >= 0 ? tr.line[i] : void 0;
+		const lv = keyLevels(s.bars, i, note.keyBars);
+		return {
+			tf: s.tf,
+			dir,
+			barTime: bar?.time ?? null,
+			close: bar?.close,
+			line,
+			age: trendAge(tr.dir, i),
+			distAtr: bar && line !== void 0 && a !== void 0 && a > 0 ? (bar.close - line) / a : void 0,
+			atr: a,
+			rsi: r,
+			align: m5Dir === null ? "NEUTRAL" : alignmentOf(dir, m5Dir),
+			keyHigh: lv?.high,
+			keyLow: lv?.low,
+			stale: sessionOpen && !freshAt(bar?.time, asOf, s.tf),
+			incomplete: i >= 0 && s.missing[i] > 0
+		};
+	}
+	function runTrendSignal(input) {
+		const cfg = input.config;
+		const sec = input.securityType;
+		const asOf = input.asOf;
+		const sessionOpen = isSessionOpen(sec, asOf);
+		const bars1 = confirmed1m(input.bars1m, asOf);
+		const m1 = buildTf(bars1, 1, sec, asOf);
+		const { series: m5, gaps } = completeOnly(buildTf(bars1, 5, sec, asOf));
+		const m15 = buildTf(bars1, 15, sec, asOf);
+		const m60 = buildTf(bars1, 60, sec, asOf);
+		const t5 = trendTrack(m5, cfg.trend);
+		const t1 = trendTrack(m1, microParams(cfg));
+		const t15 = input.skipHtf ? unknownTrack(m15, cfg.trend.algo) : trendTrack(m15, cfg.trend);
+		const t60 = input.skipHtf ? unknownTrack(m60, cfg.trend.algo) : trendTrack(m60, cfg.trend);
+		const ema5 = emaSeries(m5.bars, cfg.note);
+		const atr5 = alignPoints(m5.bars, atr(m5.bars, cfg.note.atrPeriod));
+		const idBase = `${trendKey(cfg)}|${input.symbol}|${input.contractMonth}`;
+		const signals = [];
+		const invalidations = [];
+		for (let i = 0; i < m5.bars.length; i++) {
+			const bar = m5.bars[i];
+			const from = invalidAt(t5.dir, i);
+			if (from) invalidations.push({
+				id: `${idBase}|${m5.session[i]}|5m|${wallIso(bar.time)}|INVALID`,
+				barTime: bar.time,
+				index: i,
+				from
+			});
+			const kind = switchAt(t5.dir, i);
+			if (!kind) continue;
+			const h15 = tfAt(m15, t15, bar.time);
+			const h60 = tfAt(m60, t60, bar.time);
+			const d5 = t5.dir[i];
+			signals.push({
+				id: `${idBase}|${m5.session[i]}|5m|${wallIso(bar.time)}|${kind}`,
+				kind,
+				direction: kind === "BUY" ? "LONG" : "SHORT",
+				barTime: bar.time,
+				index: i,
+				session: m5.session[i],
+				sessionEnd: m5.sessionEnd[i],
+				close: bar.close,
+				line: t5.line[i],
+				atr: atr5[i],
+				notes: {
+					ema: emaNote(m5.bars, ema5, i, kind, cfg.note.emaSlopeBars),
+					m15: h15.state,
+					m60: h60.state,
+					m15Align: alignmentOf(h15.state, d5),
+					m60Align: alignmentOf(h60.state, d5),
+					m15BarTime: h15.barTime,
+					m60BarTime: h60.barTime,
+					m15Stale: h15.stale,
+					m60Stale: h60.stale,
+					m15Incomplete: h15.incomplete,
+					m60Incomplete: h60.incomplete
+				}
+			});
+		}
+		const timing = computeEntries({
+			signals,
+			m1: m1.bars,
+			m1Session: m1.session,
+			m1SessionEnd: m1.sessionEnd,
+			m1Hole: holeBefore(bars1, sec),
+			m5: m5.bars,
+			dir5: t5.dir,
+			micro: t1.dir,
+			asOf,
+			p: cfg.entry,
+			key: entryKey(cfg)
+		});
+		const entries = timing.entries;
+		const selected = entries.filter((e) => e.mode === cfg.entry.mode);
+		const v = runVirtual({
+			m1: m1.bars,
+			m1SessionEnd: m1.sessionEnd,
+			live: input.live ?? null,
+			asOf,
+			m5,
+			t5,
+			signals,
+			invalidations,
+			entries: selected,
+			cfg: cfg.risk,
+			tick: input.tick,
+			pointValue: input.pointValue,
+			taxRate: input.taxRate ?? 0,
+			key: riskKey(cfg)
+		});
+		const events = [];
+		for (const s of signals) {
+			const n = s.notes;
+			events.push({
+				time: s.barTime,
+				kind: "SIGNAL",
+				ref: s.id,
+				text: `5m ${s.kind} @ ${s.close}（趨勢線 ${s.line ?? "—"}；EMA ${n.ema}；15m ${n.m15}${n.m15Stale ? "（過期）" : ""}／60m ${n.m60}${n.m60Stale ? "（過期）" : ""}）`
+			});
+		}
+		for (const x of invalidations) events.push({
+			time: x.barTime,
+			kind: "INVALID",
+			ref: x.id,
+			text: `5m ${x.from === "LONG" ? "多" : "空"}方趨勢失效 → NEUTRAL（不是反向訊號）`
+		});
+		for (const e of selected) events.push({
+			time: e.barTime,
+			kind: "ENTRY",
+			ref: e.id,
+			text: `1m 進場提示 ${e.mode} 第 ${e.seq} 次 ${e.direction === "LONG" ? "多" : "空"} @ ${e.refPrice}（${e.reason}）`
+		});
+		for (const g of gaps) events.push({
+			time: g.label,
+			kind: "DATA",
+			ref: `${idBase}|5m|${wallIso(g.label)}|GAP`,
+			text: `5m ${wallHm(g.label)} 缺 ${g.missing} 根 1m：資料不完整，已排除（不參與趨勢計算，不產生訊號、提示或虛擬進場）`
+		});
+		events.push(...v.events);
+		events.sort((a, b) => a.time - b.time);
+		const lastGap = gaps[gaps.length - 1];
+		const s5 = tfSnapshot(m5, t5, cfg.note, null, asOf, sessionOpen);
+		const s1 = tfSnapshot(m1, t1, cfg.note, s5.dir, asOf, sessionOpen);
+		const s15 = tfSnapshot(m15, t15, cfg.note, s5.dir, asOf, sessionOpen);
+		const s60 = tfSnapshot(m60, t60, cfg.note, s5.dir, asOf, sessionOpen);
+		const latest = signals[signals.length - 1] ?? null;
+		const lastInvalid = invalidations[invalidations.length - 1] ?? null;
+		const open = v.open;
+		const lastBar1 = m1.bars[m1.bars.length - 1];
+		return {
+			version: TSP_ALGO_VERSION,
+			configKey: configKey(cfg),
+			taxRate: input.taxRate ?? 0,
+			asOf,
+			securityType: sec,
+			symbol: input.symbol,
+			contractMonth: input.contractMonth,
+			m1,
+			m5,
+			m15,
+			m60,
+			t1,
+			t5,
+			t15,
+			t60,
+			ema5,
+			signals,
+			invalidations,
+			gaps,
+			entries,
+			trades: v.trades,
+			events,
+			snapshot: {
+				m1: s1,
+				m5: s5,
+				m15: s15,
+				m60: s60,
+				signal: latest,
+				invalid: lastInvalid && (!latest || lastInvalid.barTime > latest.barTime) ? lastInvalid : null,
+				recentGap: lastGap && asOf - lastGap.label <= 1800 ? lastGap : null,
+				entries: timing.states,
+				htfAgainst: s15.align === "DIVERGE" && s60.align === "DIVERGE",
+				trade: open ?? v.trades[v.trades.length - 1] ?? null,
+				pendingEntry: v.pendingEntry,
+				pendingExit: v.pendingExit,
+				m1Against: !!open && (s1.dir === "LONG" || s1.dir === "SHORT") && s1.dir !== open.direction
+			},
+			dataLagSec: lastBar1 ? asOf - lastBar1.time : null,
+			sessionOpen
+		};
+	}
+	//#endregion
 	//#region src/lib/trend-signal/custom-adapter.ts
 	var CUSTOM_TSP_PROFILE = {
 		tick: 1,
@@ -1657,7 +2117,7 @@
 		["虛擬3R出場", "#1fd286"],
 		["虛擬反轉失效出場", "#e0a43c"]
 	];
-	var empty = (n) => Object.fromEntries(CUSTOM_TSP_PLOTS.map(([k]) => [k, new Array(n).fill(null)]));
+	var empty$1 = (n) => Object.fromEntries(CUSTOM_TSP_PLOTS.map(([k]) => [k, new Array(n).fill(null)]));
 	/** 非法輸入必須回報錯誤，不能讓編輯器把全 null 當成有效風控。 */
 	function normalizeCustomBars(bars, params = {}) {
 		const n = bars.time.length;
@@ -1695,8 +2155,34 @@
 			taxRate
 		};
 	}
+	function inputFromCustomBars(bars, params = {}, nowWall = nowWallClockUtc()) {
+		if (!Number.isFinite(nowWall)) throw new Error("計算時刻無效");
+		const { sorted, tick, pointValue, taxRate } = normalizeCustomBars(bars, params);
+		if (sorted.length < 2) return null;
+		let step = Infinity;
+		for (let i = 1; i < sorted.length; i++) step = Math.min(step, sorted[i].time - sorted[i - 1].time);
+		if (step !== 60) throw new Error("TSP 風控自訂版只支援 1m 主圖；請切換至 1m 並載入足夠資料");
+		const visible = sorted.filter((b) => b.time <= Math.ceil(nowWall / 60) * 60);
+		if (visible.length < 2) return null;
+		const last = visible[visible.length - 1];
+		const session = tradingSessionOf("FUT", last.time);
+		const closed = nowWall >= session.end + 240 + 10;
+		const confirmed = closed ? visible : visible.slice(0, -1);
+		return {
+			bars1m: confirmed,
+			live: closed ? null : last,
+			asOf: closed ? Math.max(last.time, session.end + 240) : confirmed[confirmed.length - 1].time,
+			securityType: "FUT",
+			symbol: "TMF",
+			contractMonth: "CUSTOM",
+			tick,
+			pointValue,
+			taxRate,
+			config: configFromParams(params)
+		};
+	}
 	function projectCustomTsp(res, chartTimes, visibleThrough = Infinity, riskHistory = true) {
-		const out = empty(chartTimes.length);
+		const out = empty$1(chartTimes.length);
 		const indexes = /* @__PURE__ */ new Map();
 		chartTimes.forEach((t, i) => {
 			if (t <= visibleThrough) indexes.set(t, [...indexes.get(t) ?? [], i]);
@@ -1746,7 +2232,7 @@
 	var CHART_TSP_VERSION = "tsp-chart-1.2.0";
 	var DAY = 86400;
 	var nameOf = (key) => key === "1m 微型提示" ? "本圖微型提示" : key === "1m 結構提示" ? "本圖結構提示" : key;
-	var CHART_TSP_PLOTS = CUSTOM_TSP_PLOTS.map(([key, color]) => [nameOf(key), color]);
+	CUSTOM_TSP_PLOTS.map(([key, color]) => [nameOf(key), color]);
 	/** 宿主未傳 tf；預設由間距推斷，可用 chartTf 明訂分鐘數消除缺棒歧義。 */
 	function inferChartMinutes(times, explicit = 0) {
 		if (!Number.isInteger(explicit) || explicit < 0 || explicit > 1440) throw new Error("chartTf 必須為 0（自動）或 1–1440 分鐘");
@@ -1820,7 +2306,8 @@
 			config: configFromParams(params)
 		};
 	}
-	function runChartSignal(frame) {
+	/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助、或進場模式需要 1m 時） */
+	function runChartSignal(frame, opts = {}) {
 		const { series, config: cfg, asOf, label } = frame;
 		const track = trendTrack(series, cfg.trend);
 		const micro = trendTrack(series, microParams(cfg));
@@ -1887,7 +2374,7 @@
 			t5: track,
 			signals,
 			invalidations,
-			entries: timing.entries.filter((e) => e.mode === cfg.entry.mode),
+			entries: opts.risk === false ? [] : timing.entries.filter((e) => e.mode === cfg.entry.mode),
 			cfg: cfg.risk,
 			tick: frame.tick,
 			pointValue: frame.pointValue,
@@ -1924,48 +2411,97 @@
 			pendingExit: v.pendingExit
 		};
 	}
-	function computeChartCustomTsp(bars, params = {}, nowWall = nowWallClockUtc()) {
-		if (params.riskHistory !== void 0 && params.riskHistory !== 0 && params.riskHistory !== 1) throw new Error("riskHistory 只接受 0 或 1");
-		const frame = frameFromChart(bars, params, nowWall);
-		const result = runChartSignal(frame);
-		const through = frame.live?.time ?? frame.confirmed.at(-1)?.time ?? -Infinity;
-		const mappedTimes = bars.time.map(frame.mapTime);
-		const projected = projectCustomTsp(result, mappedTimes, through, params.riskHistory === 1);
+	/** 宿主曲線會跨 whitespace 連線：趨勢線只畫最後一段連續有效趨勢（同方向、同盤、相鄰桶），歷史成交點仍保留。 */
+	function keepLastChartSegment(projected, frame, dir, mappedTimes) {
 		const last = frame.confirmed.length - 1;
 		let start = last;
-		const direction = result.t5.dir[last];
-		while (start > 0 && result.t5.dir[start - 1] === direction && (frame.daily || frame.confirmed[start].time - frame.confirmed[start - 1].time === frame.seconds && frame.series.session[start] === frame.series.session[start - 1])) start--;
+		const direction = dir[last];
+		while (start > 0 && dir[start - 1] === direction && (frame.daily || frame.confirmed[start].time - frame.confirmed[start - 1].time === frame.seconds && frame.series.session[start] === frame.series.session[start - 1])) start--;
 		for (const key of ["多方趨勢線", "空方趨勢線"]) projected[key] = projected[key].map((v, i) => {
 			const time = mappedTimes[i];
 			if (time < (frame.confirmed[start]?.time ?? Infinity)) return null;
 			if (!frame.daily && time > (frame.confirmed[last]?.time ?? -Infinity) && (time !== frame.confirmed[last].time + frame.seconds || chartSession(time, frame.minutes).key !== frame.series.session[last])) return null;
 			return v;
 		});
-		const outputs = Object.fromEntries(Object.entries(projected).map(([k, v]) => [nameOf(k), v]));
-		const levelKeys = new Set([
-			"初始停損",
-			"目前停損",
-			"保本價",
-			"1R",
-			"2R",
-			"3R"
-		]);
-		const hints = Object.fromEntries(CHART_TSP_PLOTS.map(([key, color]) => [key, {
+	}
+	//#endregion
+	//#region src/lib/trend-signal/app-custom.ts
+	var APP_TSP_PLOTS = CUSTOM_TSP_PLOTS;
+	var LEVELS = new Set([
+		"初始停損",
+		"目前停損",
+		"保本價",
+		"1R",
+		"2R",
+		"3R"
+	]);
+	var empty = (n) => Object.fromEntries(APP_TSP_PLOTS.map(([k]) => [k, new Array(n).fill(null)]));
+	/** 主圖週期 → 計算方式 */
+	function appModeOf(minutes) {
+		return minutes === 1 ? "model" : minutes === 5 ? "m5" : "aux";
+	}
+	/** 1m 主圖的 5m 趨勢線：只畫最後一段連續的 5m 趨勢（同方向、同盤、相鄰 5m），宿主折線才不會跨段連線 */
+	function keepLastModelSegment(out, chartTimes, res) {
+		const { bars, session } = res.m5;
+		const last = bars.length - 1;
+		let start = last;
+		while (start > 0 && res.t5.dir[start - 1] === res.t5.dir[last] && bars[start].time - bars[start - 1].time === 300 && session[start] === session[start - 1]) start--;
+		const from = bars[start]?.time ?? Number.POSITIVE_INFINITY;
+		for (const key of ["多方趨勢線", "空方趨勢線"]) out[key] = out[key].map((v, i) => {
+			const t = chartTimes[i];
+			if (t < from) return null;
+			return t > bars[last].time && tradingSessionOf("FUT", t).key !== session[last] ? null : v;
+		});
+	}
+	function computeAppCustomTsp(bars, params = {}, nowWall = nowWallClockUtc()) {
+		if (params.riskHistory !== void 0 && params.riskHistory !== 0 && params.riskHistory !== 1) throw new Error("riskHistory 只接受 0（目前部位）或 1（含歷史部位）");
+		const riskHistory = params.riskHistory === 1;
+		const { sorted } = normalizeCustomBars(bars, params);
+		const mode = appModeOf(inferChartMinutes(sorted.map((b) => b.time), params.chartTf ?? 0));
+		let outputs = empty(bars.time.length);
+		let result = null;
+		if (mode === "model") {
+			const input = inputFromCustomBars(bars, params, nowWall);
+			const res = input ? runTrendSignal(input) : null;
+			if (input && res) {
+				outputs = projectCustomTsp(res, bars.time, input.live?.time ?? res.m1.bars.at(-1)?.time ?? -Infinity, riskHistory);
+				keepLastModelSegment(outputs, bars.time, res);
+			}
+			result = res;
+		} else {
+			const frame = frameFromChart(bars, params, nowWall);
+			const res = runChartSignal(frame, { risk: mode === "m5" && frame.config.entry.mode === "IMMEDIATE" });
+			const shown = mode === "m5" ? {
+				...res,
+				entries: []
+			} : {
+				...res,
+				signals: [],
+				invalidations: [],
+				entries: [],
+				trades: []
+			};
+			const mapped = bars.time.map(frame.mapTime);
+			outputs = projectCustomTsp(shown, mapped, frame.live?.time ?? frame.confirmed.at(-1)?.time ?? -Infinity, riskHistory);
+			keepLastChartSegment(outputs, frame, res.t5.dir, mapped);
+			result = res;
+		}
+		const hints = Object.fromEntries(APP_TSP_PLOTS.map(([key, color]) => [key, {
 			color,
-			kind: key.endsWith("趨勢線") ? "line" : levelKeys.has(key) ? params.riskHistory === 1 ? "points" : "line" : "points",
+			kind: key.endsWith("趨勢線") ? "line" : LEVELS.has(key) && !riskHistory ? "line" : "points",
 			width: key === "目前停損" || key.endsWith("趨勢線") ? 2 : 1
 		}]));
 		return {
-			frame,
+			mode,
 			result,
 			outputs,
-			order: CHART_TSP_PLOTS.map(([key]) => key),
+			order: APP_TSP_PLOTS.map(([key]) => key),
 			hints
 		};
 	}
 	//#endregion
 	//#region src/lib/trend-signal/custom-entry.ts
-	var result = computeChartCustomTsp(bars, p);
+	var result = computeAppCustomTsp(bars, p);
 	for (const key of result.order) plot(key, result.outputs[key], result.hints[key]);
 	//#endregion
 })();

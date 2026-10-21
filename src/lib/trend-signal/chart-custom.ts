@@ -11,7 +11,7 @@ import { isRegularMinute, tradingSessionOf, wallDate } from './core/session';
 import { runVirtual } from './risk/virtual';
 import { invalidAt, switchAt, trendTrack } from './trend/signals';
 import { computeEntries } from './trigger/entries';
-import type { AuditEvent, TfSeries, TrendInvalidation, TrendSignal } from './types';
+import type { AuditEvent, TfSeries, TrendInvalidation, TrendSignal, TrendState } from './types';
 
 export const CHART_TSP_VERSION = 'tsp-chart-1.2.0';
 const DAY = 86400;
@@ -72,7 +72,8 @@ export function frameFromChart(bars: BarsInput, params: Record<string, number> =
         config: configFromParams(params) };
 }
 
-export function runChartSignal(frame: ReturnType<typeof frameFromChart>) {
+/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助、或進場模式需要 1m 時） */
+export function runChartSignal(frame: ReturnType<typeof frameFromChart>, opts: { risk?: boolean } = {}) {
     const { series, config: cfg, asOf, label } = frame;
     const track = trendTrack(series, cfg.trend);
     const micro = trendTrack(series, microParams(cfg));
@@ -95,7 +96,7 @@ export function runChartSignal(frame: ReturnType<typeof frameFromChart>) {
         m1Hole: series.bars.map(() => false), m5: series.bars, dir5: track.dir, micro: micro.dir,
         asOf, p: cfg.entry, key: `${key}|${entryKey(cfg)}`, chartMinutes: frame.minutes });
     const v = runVirtual({ m1: series.bars, m1SessionEnd: series.sessionEnd, live: frame.live, asOf,
-        m5: series, t5: track, signals, invalidations, entries: timing.entries.filter((e) => e.mode === cfg.entry.mode),
+        m5: series, t5: track, signals, invalidations, entries: opts.risk === false ? [] : timing.entries.filter((e) => e.mode === cfg.entry.mode),
         cfg: cfg.risk, tick: frame.tick, pointValue: frame.pointValue, taxRate: frame.taxRate, key: `${key}|${riskKey(cfg)}`, clock: frame.clock });
     const events: AuditEvent[] = signals.map((s) => ({ time: s.barTime, kind: 'SIGNAL', ref: s.id, text: `本圖 ${label} ${s.kind} @ ${s.close}` }));
     // 共用的提示與風控文字以原模型的 1m／5m 命名；本圖模式兩者都是主圖週期（只改完整的 1m／5m 字樣，15m、60m 不受影響）
@@ -108,18 +109,13 @@ export function runChartSignal(frame: ReturnType<typeof frameFromChart>) {
         pendingExit: v.pendingExit } satisfies CustomPlotResult & Record<string, unknown>;
 }
 
-export function computeChartCustomTsp(bars: BarsInput, params: Record<string, number> = {}, nowWall = nowWallClockUtc()) {
-    if (params.riskHistory !== undefined && params.riskHistory !== 0 && params.riskHistory !== 1) throw new Error('riskHistory 只接受 0 或 1');
-    const frame = frameFromChart(bars, params, nowWall);
-    const result = runChartSignal(frame);
-    const through = frame.live?.time ?? frame.confirmed.at(-1)?.time ?? -Infinity;
-    const mappedTimes = bars.time.map(frame.mapTime);
-    const projected = projectCustomTsp(result, mappedTimes, through, params.riskHistory === 1);
-    // 宿主曲線會跨 whitespace 連線：只畫最後一段連續有效趨勢，歷史成交點仍保留。
+/** 宿主曲線會跨 whitespace 連線：趨勢線只畫最後一段連續有效趨勢（同方向、同盤、相鄰桶），歷史成交點仍保留。 */
+export function keepLastChartSegment(projected: Record<string, (number | null)[]>, frame: ReturnType<typeof frameFromChart>,
+    dir: TrendState[], mappedTimes: number[]) {
     const last = frame.confirmed.length - 1;
     let start = last;
-    const direction = result.t5.dir[last];
-    while (start > 0 && result.t5.dir[start - 1] === direction &&
+    const direction = dir[last];
+    while (start > 0 && dir[start - 1] === direction &&
         (frame.daily || (frame.confirmed[start]!.time - frame.confirmed[start - 1]!.time === frame.seconds &&
             frame.series.session[start] === frame.series.session[start - 1]))) start--;
     for (const key of ['多方趨勢線', '空方趨勢線']) {
@@ -132,6 +128,16 @@ export function computeChartCustomTsp(bars: BarsInput, params: Record<string, nu
             return v;
         });
     }
+}
+
+export function computeChartCustomTsp(bars: BarsInput, params: Record<string, number> = {}, nowWall = nowWallClockUtc()) {
+    if (params.riskHistory !== undefined && params.riskHistory !== 0 && params.riskHistory !== 1) throw new Error('riskHistory 只接受 0 或 1');
+    const frame = frameFromChart(bars, params, nowWall);
+    const result = runChartSignal(frame);
+    const through = frame.live?.time ?? frame.confirmed.at(-1)?.time ?? -Infinity;
+    const mappedTimes = bars.time.map(frame.mapTime);
+    const projected = projectCustomTsp(result, mappedTimes, through, params.riskHistory === 1);
+    keepLastChartSegment(projected, frame, result.t5.dir, mappedTimes);
     const outputs = Object.fromEntries(Object.entries(projected).map(([k, v]) => [nameOf(k), v]));
     const levelKeys = new Set(['初始停損', '目前停損', '保本價', '1R', '2R', '3R']);
     const hints = Object.fromEntries(CHART_TSP_PLOTS.map(([key, color]) => [key, { color,

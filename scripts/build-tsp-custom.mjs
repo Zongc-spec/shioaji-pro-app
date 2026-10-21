@@ -17,16 +17,17 @@ export async function buildCustomSource() {
     });
     const chunks = (Array.isArray(built) ? built : [built]).flatMap((r) => r.output).filter((o) => o.type === 'chunk');
     if (chunks.length !== 1 || chunks[0].imports.length || chunks[0].dynamicImports.length) throw new Error('自訂指標必須是無外部依賴的單檔');
-    const version = fs.readFileSync(path.join(root, 'src/lib/trend-signal/chart-custom.ts'), 'utf8').match(/CHART_TSP_VERSION = '([^']+)'/)?.[1];
+    const version = fs.readFileSync(path.join(root, 'src/lib/trend-signal/app-custom.ts'), 'utf8').match(/APP_TSP_VERSION = '([^']+)'/)?.[1];
     if (!version) throw new Error('找不到計算版本');
-    return `// Trend Signal Pro ${version} — Web/App 共用計算函式，官方 App 本圖週期自訂指標\n` +
+    return `// Trend Signal Pro ${version} — Web/App 共用計算函式，官方 App 自訂指標\n` +
         '// 由 npm run build:tsp-custom 產生；請修改 src/lib/trend-signal 的共用來源。\n' +
+        '// 5m 是主趨勢並判斷進出場，1m 是精準進出場；App 只給主圖本身的 K 棒，所以依主圖週期：\n' +
+        '//   1m 主圖：原模型（由 1m 聚合 5m 主趨勢、1m 精準提示、虛擬風控），與 Web 逐根相同。\n' +
+        '//   5m 主圖：5m 主趨勢與 5m 收棒的進出場（IMMEDIATE）；沒有 1m，不畫 1m 提示，停損以 5m K 棒近似。\n' +
+        '//   15m／60m／日K：只畫該週期趨勢線作高週期輔助，不產生訊號、進出場與風控。\n' +
         '// 預設明訂微台：tick=1、每點10元、單邊手續費12元、單邊期交稅0.00002；不自動辨識商品或真實持倉。\n' +
-        '// 依目前主圖週期重算；與原固定5m趨勢/1m觸發模型不同。chartTf=0自動推斷，必要時明訂分鐘數。\n' +
-        '// 日K依App提供的日曆日OHLCV、下一根可用日K；沒有正式交易日曆，也不能還原棒內分鐘路徑。\n' +
         '// 輸出19條：趨勢/提示、初始/目前停損、保本、1R/2R/3R、虛擬進出場；全部為觀察與虛擬計算。\n' +
-        '// 趨勢預設線，只顯示最後一段有效趨勢；目前停損請在App樣式手動選階梯線。\n' +
-        '// 自訂API沒有文字箭頭或階梯預設；點的名稱/價格在圖例滑鼠提示查看，可於樣式啟用價格標籤。\n' +
+        '// 趨勢線只顯示最後一段有效趨勢；目前停損請在App樣式手動選階梯線。\n' +
         '// 不讀帳密、不連網、不送改撤單；沒有原生Feed的資料凍結、LIVE徽章或完整審計面板。\n' +
         '// 更新歷史/載入起點/參數變更仍會重算；與Web比對需相同資料、asOf、商品規格與完整設定。\n' + chunks[0].code;
 }

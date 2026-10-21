@@ -1,6 +1,6 @@
-// 僅供本圖 demo：用和圖表相同的 stub 1m KBars，依目前週期重算共用核心。
+// 僅供 demo：用和圖表相同的 stub 1m KBars，依目前主圖週期跑 App 單檔的同一個分派（app-custom.ts）。
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { computeChartCustomTsp } from '../../src/lib/trend-signal/chart-custom';
+import { APP_TSP_VERSION, computeAppCustomTsp } from '../../src/lib/trend-signal/app-custom';
 import { runCustom, type BarsInput } from '../../src/lib/custom-runtime';
 import { exitText } from '../../src/lib/trend-signal/risk/virtual';
 import { aggregate, kbarsToCandles, nowWallClockUtc } from '../../src/lib/utils/kbars';
@@ -50,7 +50,7 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
             const bars = asInput(chart);
             const apiParams = { ...params, chartTf: minutes };
             const now = nowWallClockUtc();
-            const direct = computeChartCustomTsp(bars, apiParams, now);
+            const direct = computeAppCustomTsp(bars, apiParams, now);
             // runCustom executes the actual self-contained official custom script.
             // Freeze the demo clock only for this synchronous call so both paths share the same asOf.
             const previousNow = Date.now;
@@ -76,16 +76,19 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
                     expected.color === actual.color && expected.width === actual.width;
             });
             const lastBar = chart.at(-1) ?? null;
-            const openTrade = [...direct.result.trades].reverse().find((trade) => trade.status === 'OPEN') ?? null;
-            const closed = direct.result.trades.filter((trade) => trade.status === 'CLOSED')
+            const trades = direct.result?.trades ?? [];
+            const openTrade = [...trades].reverse().find((trade) => trade.status === 'OPEN') ?? null;
+            const closed = trades.filter((trade) => trade.status === 'CLOSED')
                 .sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0)).slice(0, 4);
-            return { direct, runtime, sameOrder, sameSeries, sameHints, lastBar, openTrade, closed, chartBars: chart.length };
+            return { kind: 'ok' as const, direct, runtime, sameOrder, sameSeries, sameHints, lastBar, openTrade, closed, chartBars: chart.length, mode: direct.mode };
         } catch (error) {
-            return { error: error instanceof Error ? error.message : String(error) };
+            return { kind: 'error' as const, error: error instanceof Error ? error.message : String(error) };
         }
     }, [candles, minutes, params, source]);
 
-    const open = audit && 'direct' in audit ? audit.openTrade : null;
+    // 判別欄位收窄：成功與錯誤兩種結果
+    const ok = audit?.kind === 'ok' ? audit : null;
+    const open = ok ? ok.openTrade : null;
     const styles: Record<string, CSSProperties> = {
         panel: { width: 350, flex: '0 0 350px', height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '12px 14px', background: '#0b0e14', color: '#d8dee9', borderLeft: '1px solid #293241', font: '12px/1.5 system-ui, sans-serif' },
         title: { fontSize: 15, fontWeight: 700, color: '#f4f7fb', marginBottom: 4 },
@@ -98,21 +101,23 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
         bad: { color: '#ff777e', fontWeight: 700 },
     };
 
-    return <aside style={styles.panel} aria-label='本圖週期審計'>
-        <div style={styles.title}>本圖週期審計</div>
-        <div style={styles.note}>本圖 {timeframe}／合成回放／非原生 App；不是舊固定 5m 審計。</div>
-        <div style={styles.row}><span style={styles.label}>計算核心</span><span>tsp-chart-1.2.0</span></div>
-        <div style={styles.row}><span style={styles.label}>週期／資料列</span><span>{timeframe}／{audit && 'chartBars' in audit ? audit.chartBars : '—'}</span></div>
+    const modeText = { model: '原模型（5m 主趨勢＋1m 精準進出場）', m5: '5m 主趨勢、5m 收棒進出場（停損以 5m 近似）', aux: '高週期輔助：只畫趨勢線' } as const;
+    return <aside style={styles.panel} aria-label='App 單檔審計'>
+        <div style={styles.title}>App 單檔審計</div>
+        <div style={styles.note}>主圖 {timeframe}／合成回放／非原生 App。</div>
+        <div style={styles.row}><span style={styles.label}>計算方式</span><span>{ok ? modeText[ok.mode] : '—'}</span></div>
+        <div style={styles.row}><span style={styles.label}>版本</span><span>{APP_TSP_VERSION}</span></div>
+        <div style={styles.row}><span style={styles.label}>週期／資料列</span><span>{timeframe}／{ok ? ok.chartBars : '—'}</span></div>
         <div style={styles.row}><span style={styles.label}>資料來源</span><span>stub 合成 1m → 本圖聚合</span></div>
-        <div style={styles.row}><span style={styles.label}>本圖末棒</span><span>{audit && 'lastBar' in audit ? wallTime(audit.lastBar?.time) : '—'}</span></div>
+        <div style={styles.row}><span style={styles.label}>本圖末棒</span><span>{ok ? wallTime(ok.lastBar?.time) : '—'}</span></div>
         <div style={styles.row}><span style={styles.label}>虛擬風險預算</span><span>{money(budgetOverride ?? params.budget ?? 1000)}{budgetOverride !== undefined ? '（URL 測試值）' : '（預設）'}</span></div>
 
         <section style={styles.section}>
             <strong>虛擬部位</strong>
             {loadError && <div style={styles.bad}>載入失敗：{loadError}</div>}
             {!loadError && !candles && <div style={styles.label}>載入合成 K 棒…</div>}
-            {audit && 'error' in audit && <div style={styles.bad}>計算錯誤：{audit.error}</div>}
-            {audit && 'direct' in audit && open && <div style={styles.card}>
+            {audit?.kind === 'error' && <div style={styles.bad}>計算錯誤：{audit.error}</div>}
+            {ok && open && <div style={styles.card}>
                 <div style={{ ...styles.row, fontWeight: 700 }}>
                     <span style={open.direction === 'LONG' ? styles.good : styles.bad}>{open.direction === 'LONG' ? '多單' : '空單'} {open.openQty}/{open.qty} 口</span>
                     <span>持有中（虛擬）</span>
@@ -123,13 +128,13 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
                 <div style={styles.row}><span style={styles.label}>R1／R2／R3</span><span>{price(open.plan.r1)}／{price(open.plan.r2)}／{price(open.plan.r3)}</span></div>
                 <div style={styles.row}><span style={styles.label}>出場費稅／淨損益</span><span>未平倉，尚未結算</span></div>
             </div>}
-            {audit && 'direct' in audit && !open && <div style={styles.card}>目前無未平倉虛擬部位；資料暖身或本圖條件不足時會維持空手。</div>}
+            {ok && !open && <div style={styles.card}>{ok.mode === 'aux' ? '高週期只畫趨勢線，不建立虛擬部位；進出場請看 1m 或 5m 主圖。' : '目前無未平倉虛擬部位；資料暖身或條件不足時會維持空手。'}</div>}
         </section>
 
         <section style={styles.section}>
             <strong>近期已平倉（合成虛擬結果）</strong>
-            {audit && 'direct' in audit && audit.closed.length === 0 && <div style={styles.label}>尚無已平倉部位。</div>}
-            {audit && 'direct' in audit && audit.closed.map((trade) => <div key={trade.id} style={styles.card}>
+            {ok && ok.closed.length === 0 && <div style={styles.label}>尚無已平倉部位。</div>}
+            {ok && ok.closed.map((trade) => <div key={trade.id} style={styles.card}>
                 <div style={styles.row}>
                     <span>{trade.direction === 'LONG' ? '多' : '空'} {trade.qty}口 · {wallTime(trade.fillAt)}</span>
                     <strong>{trade.exitReason ? exitText(trade.exitReason).replace('5m', '本圖') : '出場'}</strong>
@@ -141,11 +146,11 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
 
         <section style={styles.section}>
             <strong>新版單檔 vs 直接核心</strong>
-            {audit && 'direct' in audit && <>
-                <div style={styles.row}><span style={styles.label}>輸出數列</span><span>{audit.runtime.order.length}／19</span></div>
-                <div style={styles.row}><span style={styles.label}>順序／值逐項一致</span><span style={audit.sameOrder && audit.sameSeries ? styles.good : styles.bad}>{audit.sameOrder && audit.sameSeries ? '一致' : '不一致'}</span></div>
-                <div style={styles.row}><span style={styles.label}>plot hints（含 width）</span><span style={audit.sameHints ? styles.good : styles.bad}>{audit.sameHints ? '一致' : '不一致'}</span></div>
-                {audit.runtime.error && <div style={styles.bad}>單檔錯誤：{audit.runtime.error}</div>}
+            {ok && <>
+                <div style={styles.row}><span style={styles.label}>輸出數列</span><span>{ok.runtime.order.length}／19</span></div>
+                <div style={styles.row}><span style={styles.label}>順序／值逐項一致</span><span style={ok.sameOrder && ok.sameSeries ? styles.good : styles.bad}>{ok.sameOrder && ok.sameSeries ? '一致' : '不一致'}</span></div>
+                <div style={styles.row}><span style={styles.label}>plot hints（含 width）</span><span style={ok.sameHints ? styles.good : styles.bad}>{ok.sameHints ? '一致' : '不一致'}</span></div>
+                {ok.runtime.error && <div style={styles.bad}>單檔錯誤：{ok.runtime.error}</div>}
             </>}
         </section>
         <div style={{ ...styles.section, ...styles.label }}>僅使用此 demo 的合成資料。風控、費稅及損益均為虛擬計算，不是績效或交易建議。</div>
