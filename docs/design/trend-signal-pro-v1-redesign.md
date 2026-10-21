@@ -1,6 +1,8 @@
 # Trend Signal Pro V1.0 — 重設計提案：獨立趨勢指標
 
 狀態：**已確認（2026-10-20）**，依 §9 的決定實作於 `e2762fc`。EMA9／VWAP／KD 舊假說凍結為可選比較模式，不再擴充。
+**V1.1（2026-10-21）**：使用者的 [核心修正規格](trend-signal-pro-v1-1-core-correction.md) 優先於本提案的 1m 窗口、
+MICRO_TREND 與 Donchian 定義；實作於 `e3178db`，差異與 Gate 證據見 [實作紀錄](trend-signal-pro-v1-impl.md) 的 V1.1 節。
 量測依據：[docs/research/trend-signal-algorithms-2026-10.md](../research/trend-signal-algorithms-2026-10.md)。
 確認後修訂 [trend-signal-pro-v1.md](trend-signal-pro-v1.md) 的 §1.1、§1.2、§4、§7（見 §8）；§0、§1.3、§2、§3、§6 保留。
 

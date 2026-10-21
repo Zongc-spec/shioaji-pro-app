@@ -1,9 +1,9 @@
 // 回放驗證（研究量測，不在 CI 執行）：以出貨引擎在真實 TMF 1m 上模擬實際運作 —
 // 歷史起點固定在 20 天前（一天抓一次），asOf 每 3 分鐘前進一次，逐步比對：
-//   1. 已出現的 5m 訊號之後逐欄相同（不重繪）
-//   2. 已定案（非 PENDING）的進場事件之後不變
+//   1. 已出現的 5m 訊號與失效事件之後逐欄相同（不重繪）
+//   2. 1m 提示（V1.1：產生即定案）之後不變，也不會事後補出更早的提示
 //   3. 已發生的虛擬成交、出場與停損變更之後不變
-//   4. 注入極端的進行中 K 棒：訊號與進場事件不受影響
+//   4. 注入極端的進行中 K 棒：訊號與提示不受影響
 // 三種核心演算法各跑兩段期間。用法同 characterize.char.ts（TSP_CHAR_CSV / TSP_CHAR_OUT）。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,7 +38,6 @@ test('replay validation', () => {
             const run = (asOf: number, live: Candle | null = null): TrendSignalResult =>
                 runTrendSignal({ bars1m: bars, live, asOf, securityType: 'FUT', symbol: 'TMFR1', contractMonth: 'R1', tick: 1, pointValue: 10, config });
             const final = run(to);
-            const entryById = new Map(final.entries.map((e) => [e.id, JSON.stringify(e)]));
             const tradeById = new Map(final.trades.map((t) => [t.id, t]));
             let steps = 0;
             let sigChecks = 0;
@@ -49,13 +48,11 @@ test('replay validation', () => {
                 steps++;
                 const r = run(asOf);
                 const prefix = final.signals.filter((s) => s.barTime <= asOf);
-                sigChecks += r.signals.length;
+                sigChecks += r.signals.length + r.invalidations.length;
                 if (JSON.stringify(r.signals) !== JSON.stringify(prefix)) bad.push(`signals @${asOf}`);
-                for (const e of r.entries) {
-                    if (e.status === 'PENDING') continue;
-                    entryChecks++;
-                    if (entryById.get(e.id) !== JSON.stringify(e)) bad.push(`entry ${e.id} @${asOf}`);
-                }
+                if (JSON.stringify(r.invalidations) !== JSON.stringify(final.invalidations.filter((x) => x.barTime <= asOf))) bad.push(`invalidations @${asOf}`);
+                entryChecks += r.entries.length;
+                if (JSON.stringify(r.entries) !== JSON.stringify(final.entries.filter((e) => e.barTime <= asOf))) bad.push(`entries @${asOf}`);
                 for (const t of r.trades) {
                     const f = tradeById.get(t.id);
                     fillChecks += t.fills.length + t.stopHistory.length;
@@ -70,7 +67,7 @@ test('replay validation', () => {
                     if (JSON.stringify(spike.signals) !== JSON.stringify(r.signals) || JSON.stringify(spike.entries) !== JSON.stringify(r.entries)) bad.push(`live spike @${asOf}`);
                 }
             }
-            out.push(`${algo} ${a}..${b}: steps=${steps} signals=${final.signals.filter((s) => s.barTime > from).length} trades=${final.trades.filter((t) => t.fillTime > from).length} 比對 訊號=${sigChecks} 進場事件=${entryChecks} 成交與停損=${fillChecks} 不一致=${bad.length}${bad.length ? ` 例：${bad.slice(0, 3).join('；')}` : ''}`);
+            out.push(`${algo} ${a}..${b}: steps=${steps} signals=${final.signals.filter((s) => s.barTime > from).length} invalid=${final.invalidations.filter((x) => x.barTime > from).length} hints=${final.entries.filter((e) => e.barTime > from).length} trades=${final.trades.filter((t) => t.fillTime > from).length} 比對 訊號與失效=${sigChecks} 提示=${entryChecks} 成交與停損=${fillChecks} 不一致=${bad.length}${bad.length ? ` 例：${bad.slice(0, 3).join('；')}` : ''}`);
         }
     }
     writeFileSync(OUT, out.join('\n') + '\n');

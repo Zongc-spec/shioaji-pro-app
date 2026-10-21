@@ -1,7 +1,8 @@
-# Trend Signal Pro V1.0 — 實作紀錄與 Gate
+# Trend Signal Pro V1.0／V1.1 — 實作紀錄與 Gate
 
-規格：[trend-signal-pro-v1.md](trend-signal-pro-v1.md)。本文件記錄 P0 基線、
-實作前定案的設計決策，以及各階段 Gate 的實際結果。
+規格：[trend-signal-pro-v1.md](trend-signal-pro-v1.md)；V1.1 優先規格：
+[trend-signal-pro-v1-1-core-correction.md](trend-signal-pro-v1-1-core-correction.md)（覆蓋前者 §1.1／§1.2）。
+本文件記錄 P0 基線、實作前定案的設計決策，以及各階段 Gate 的實際結果；V1.1 見文末。
 
 ## P0 — 基線（2026-10-20）
 
@@ -127,3 +128,71 @@ BUY/SELL，避免資料起點造成假訊號。
 | P3 Risk planner（虛擬） | 完成 | `e2762fc`：risk/plan、risk/virtual；R 面板在 P2 |
 | P4 模擬交易 adapter | **未授權，不實作** | — |
 | P5 Acceptance | 完成（原生 App 實測除外） | 上節 |
+
+## V1.1 核心修正（2026-10-21）
+
+使用者推送 V1.1 優先規格（`fbedfd1`，合併於 `07bcb2c`）。程式：`e3178db`；計算版本 `tsp-1.1.0`。
+
+### Gate 0 — 既有成果盤點與遷移
+
+| 既有成果 | 處理 |
+|---|---|
+| core（已收棒、週期聚合、時段、即時 1m） | 保留；`TfSeries` 加每根的時段收盤，新增 `tfBucket`／`freshAt`（過期判定） |
+| trend（SuperTrend／Donchian／KAMA） | 狀態改四態；Donchian 改為 V1.1 的候選 C；SuperTrend、KAMA 演算法不變 |
+| trigger 的 15 分鐘窗口（舊規格 §1.2 的「候選有效期」） | 降為可選 post-flip window（`hintWindow`，預設 0＝整段趨勢） |
+| MICRO_TREND 一律用 1m SuperTrend | 改用與 5m 同一演算法家族，參數獨立 |
+| PULLBACK_KD（EMA9／VWAP／KD，舊策略假說） | 保留為第三套可選 plugin，名稱「先前策略假說／未驗證」，只在風控選用時計算（預設 OFF） |
+| EMA21 斜率（舊規格 §1.1） | V1.0 重設計時已改為註記，不變 |
+| risk（計畫、虛擬部位）、UI（Dashboard、R 面板、審計、1m 小圖、標記）、安全測試 | 保留並擴充（見下） |
+
+遷移：計算版本升為 `tsp-1.1.0`（舊 ID 不混淆）；語義改變的參數換鍵名（`windowBars`→`hintWindow`、
+`microMult`→`microStMult`），V1.0 已存實例的 15 分鐘窗口與 1m 倍數 1 不沿用。遷移驗證：V1.1 程式以 V1.0 窗口重跑
+結果 4，SuperTrend 核心逐欄相同（量測報告結果 4 末段）。
+
+### V1.1 設計決策
+
+**D13 TrendCore 四態。** LONG／SHORT／NEUTRAL／UNKNOWN。BUY＝已收 5m 由 SHORT／NEUTRAL 進入 LONG，SELL 鏡像；每次
+切換一個不可變事件。規格寫「非 LONG→LONG」；前一根 UNKNOWN（暖身）時不知道之前的狀態，不算切換，否則暖身結束與
+資料起點不同都會產生假訊號、同一根 K 棒的訊號 ID 也會隨視窗起點改變（D5 的延續）。
+
+**D14 候選 C＝Donchian 突破＋ATR 追蹤帶。** 收盤突破前 n 根最高（最低）價進入 LONG（SHORT）；追蹤帶＝近 n 根（含當根）
+最高價 − k × ATR14 的棘輪，收盤跌破即 NEUTRAL（失效事件，不是 SELL），再突破才有新訊號。暖身 dcLength + 120（實測）。
+
+**D15 過期（MtfContext）。** 時點 t 已知的最後一根 tf K 棒若不是前一個桶（換盤後尚未收第一根、資料缺洞），該週期為
+stale。Dashboard 標「過期」；5m 過期時 1m 不提示。15m／60m 只註記，不否決 5m。
+
+**D16 提示範圍。** 一段 5m 趨勢從訊號收棒後開始，到 5m 離開該方向為止（每根 1m 看 label ≤ 它的最後一根已收 5m）；
+可選 post-flip N 根 5m（不超過該盤收盤）。每盤最後一根 1m 不提示（下一根開盤已是下一盤）。提示產生即定案，ID 帶觸發
+1m 時間，`seq` 為本段第幾次。
+
+**D17 MICRO_TREND 同家族。** 1m 用 5m 的演算法，只換該演算法的靈敏度參數（SuperTrend 倍數、Donchian 週期、KAMA 遲滯），
+其餘沿用趨勢設定；1m 由反向或中性轉回同向即提示。預設倍數 3（V1.0 為 1）：整段趨勢範圍下倍數 1 每段約 12.6 次提示
+（量測報告結果 6 §3b）。
+
+**D18 PRICE_STRUCTURE 多次提示。** 提示後要有新的、形成於提示之後的已確認回檔轉折，才可能再提示。
+
+**D19 風控。** 5m 失效與反向同樣在下一根 1m 開盤平倉（候選 C 的追蹤帶就是規格 §3 的「ATR 出場帶」）。持倉或待成交時
+略過提示（不加碼），停損出場後下一次提示可再進場；成交 K 棒是否跨盤以提示所在盤判斷（整段趨勢會延續到下一盤）。
+期交稅：契約價值 × 稅率，元以下四捨五入（股價指數類 0.00002），計入成本、保本價與已實現損益。
+
+**D20 UI 語義。** 主圖 `5m BUY／SELL`＝主趨勢切換、`5m 失效`、`ENTRY 模式代號 HH:MM`＝1m 執行候選（換到 5m 以上主圖仍
+保留原始 1m 時間）。Dashboard 顯示演算法參數與版本、各週期最後已收 K 棒時間與過期、各模式本段提示次數與最近一次。
+
+### Gate 結果（V1.1）
+
+| Gate | 狀態 | 證據 |
+|---|---|---|
+| Gate 0 盤點／遷移 | 完成 | 上節；遷移驗證 |
+| Gate 1 TrendCore | 完成 | `trend.test.ts`：三個候選的 A1 不偷看、A3 一次切換一個事件、A4、A5 棘輪、A7 起點不變、A10 參考實作（C 以 `donchian()`／`atr()` 建的狀態機逐根對照）；`engine.test.ts`：重算相同 ID、資料缺洞、歷史回補（補齊後與一次完整計算 `toEqual`）、隔夜／午休；`core.test.ts`：過期判定；真實資料回放 0 不一致、起點不變性（量測報告結果 3、5） |
+| Gate 2 EntryTiming | 完成 | `trigger.test.ts`：整段範圍、post-flip、反向／失效停止、過期、每盤最後一根、多次提示與 `seq`、未確認轉折不觸發、空單鏡像、舊假說只在選用時計算；`engine.test.ts` Gate 2：三個核心的每個提示當時 5m 同向且未過期、不在該盤最後一根 |
+| Gate 3 UI | 完成（原生 App 未實測） | `candle-chart-tsp.test.tsx`：指標選單、標記、切換 1m/5m/15m/60m 標記數不變、隱藏、組合商品；`trend-signal-panel.test.ts`：警示去重（重開不重播）、審計含演算法與參數；展示頁截圖（SuperTrend、Donchian＋ATR） |
+| Gate 4 RiskPlanner | 完成 | `risk.test.ts`：期交稅、失效平倉、持倉略過與停損後再進場、以提示所在盤判斷跨盤；`safety.test.ts`：TSP 程式不 import 任何下單模組 |
+| Gate 5 公平比較 | 完成（不指定最佳） | 量測報告結果 6：同資料、同成本、樣本內／外、日夜盤、月份型態；三個核心的 SAR 每筆 |t| < 2，沒有可分辨的成本後優勢；無法直接比較原版 |
+| P4 模擬委託連動 | **未授權，不實作** | — |
+
+測試：`npm test` 232 files passed／1 skipped、3633 tests passed／2 skipped；`tsc -b`、`vite build` 通過。
+
+未完成與待辦：
+
+- 原生桌面 App 未實測（同 P5；需私有 repo 與本機 sidecar）。
+- 進 main 前需依 DEV.md 跑一輪 AI review（`/code-review`）與 QA 驗收；本次只推送開發分支，未開 PR。

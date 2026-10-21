@@ -2,6 +2,9 @@
 // （src/lib/trend-signal/engine.ts）跑整年 TMF 1m，比較 IMMEDIATE、MICRO_TREND、
 // PRICE_STRUCTURE、舊假說 PULLBACK_KD 的觸發率、延遲與相對 IMMEDIATE 的進場價差。
 // 進場價 = 觸發 K 棒的下一根 1m 開盤（未計滑價）。只量測時機，不是策略損益。
+// V1.1 之後每段趨勢可有多次提示；這裡沿用 V1.0 的量測定義：post-flip 窗口 3 根 5m
+// （windowBars = 3）內的第一次提示＝「觸發」，用來對照 V1.0 的結果 4（遷移驗證）。
+// V1.1 整段趨勢的提示量測見 gate5-comparison.char.ts。
 // 用法同 characterize.char.ts（TSP_CHAR_CSV / TSP_CHAR_OUT）。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,19 +48,19 @@ test('entry modes', () => {
     const asOf = m1[m1.length - 1]!.time;
     const variants: [string, EntryMode, (c: TrendSignalConfig) => TrendSignalConfig][] = [
         ['IMMEDIATE', 'IMMEDIATE', (c) => c],
-        ['MICRO_TREND 1m ST 倍數 0.75', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 0.75 } })],
-        ['MICRO_TREND 1m ST 倍數 1.0（預設）', 'MICRO_TREND', (c) => c],
-        ['MICRO_TREND 1m ST 倍數 1.5', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 1.5 } })],
-        ['MICRO_TREND 1m ST 倍數 3', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 3 } })],
+        ['MICRO_TREND 1m 倍數 0.75', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 0.75 } })],
+        ['MICRO_TREND 1m 倍數 1.0（V1.0 預設）', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 1 } })],
+        ['MICRO_TREND 1m 倍數 1.5', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 1.5 } })],
+        ['MICRO_TREND 1m 倍數 3（V1.1 預設）', 'MICRO_TREND', (c) => ({ ...c, entry: { ...c.entry, microMult: 3 } })],
         ['PRICE_STRUCTURE 回檔 ≥ 0', 'PRICE_STRUCTURE', (c) => ({ ...c, entry: { ...c.entry, minPullbackAtr: 0 } })],
         ['PRICE_STRUCTURE 回檔 ≥ 0.5 ATR（預設）', 'PRICE_STRUCTURE', (c) => c],
         ['PRICE_STRUCTURE 回檔 ≥ 1 ATR', 'PRICE_STRUCTURE', (c) => ({ ...c, entry: { ...c.entry, minPullbackAtr: 1 } })],
-        ['PULLBACK_KD（舊假說）', 'PULLBACK_KD', (c) => c],
+        ['PULLBACK_KD（先前策略假說／未驗證）', 'PULLBACK_KD', (c) => c],
     ];
     let md = '';
     const json: Record<string, unknown[]> = {};
     for (const algo of ['supertrend', 'donchian', 'kama'] as TrendAlgoId[]) {
-        const base: TrendSignalConfig = { ...DEFAULT_CONFIG, trend: { ...DEFAULT_CONFIG.trend, algo } };
+        const base: TrendSignalConfig = { ...DEFAULT_CONFIG, trend: { ...DEFAULT_CONFIG.trend, algo }, entry: { ...DEFAULT_CONFIG.entry, windowBars: 3 } };
         let baseline: Map<string, number> | null = null;
         let big: Set<string> | null = null;
         let failed: Set<string> | null = null;
@@ -65,7 +68,7 @@ test('entry modes', () => {
         const rows: unknown[] = [];
         md += `\n### ${algo}\n\n| 模式 | 觸發% | 延遲中位(分) | 改善中位(ATR) | 改善平均(ATR) | 改善P10(ATR) | 大行情改善平均(ATR) | 進場後30分逆向中位(ATR) | 大行情錯過% | 失敗訊號避開% |\n|---|---|---|---|---|---|---|---|---|---|\n`;
         for (const [name, mode, tweak] of variants) {
-            const cfg = tweak(base);
+            const cfg = tweak({ ...base, entry: { ...base.entry, mode } });
             const r = runTrendSignal({ bars1m: m1, asOf, securityType: 'FUT', symbol: 'TMFR1', contractMonth: 'R1', tick: 1, pointValue: 10, config: cfg });
             const bars = r.m1.bars;
             const sigs = r.signals;
@@ -95,15 +98,17 @@ test('entry modes', () => {
             let hits = 0;
             let bigMissed = 0;
             let failedAvoided = 0;
-            for (const e of r.entries) {
-                if (e.mode !== mode) continue;
-                const s = sigById.get(e.signalId)!;
-                if (e.status !== 'TRIGGERED') {
+            // 每個訊號在窗口內的第一次提示＝觸發（V1.0 的定義）；沒有提示＝未觸發
+            const firstHint = new Map<string, number>();
+            for (const e of r.entries) if (e.mode === mode && !firstHint.has(e.signalId)) firstHint.set(e.signalId, e.barTime);
+            for (const s of sigs) {
+                const bt = firstHint.get(s.id);
+                if (bt === undefined) {
                     if (big.has(s.id)) bigMissed++;
                     if (failed!.has(s.id)) failedAvoided++;
                     continue;
                 }
-                const n = firstAfter(bars, e.barTime!);
+                const n = firstAfter(bars, bt);
                 if (n >= bars.length || bars[n]!.time > s.sessionEnd) {
                     if (big.has(s.id)) bigMissed++;
                     if (failed!.has(s.id)) failedAvoided++;

@@ -1,7 +1,8 @@
 // 起點不變性（研究量測，不在 CI 執行）：從 373 個不同起點各取 3000 根 5m，以
-// src/lib/trend-signal/trend/algorithms.ts 的實作計算，量測方向與線值（差 > 0.5 點）
-// 最晚在起點後第幾根才與全量計算永久一致 → 決定各演算法的暖身長度。
-// 只比較兩邊都已有方向的 K 棒；另記錄子序列仍無方向、全量已有方向的最後一根。
+// src/lib/trend-signal/trend/algorithms.ts 的實作計算，量測狀態（LONG／SHORT／NEUTRAL）與
+// 線值（差 > 0.5 點）最晚在起點後第幾根才與全量計算永久一致 → 決定各演算法的暖身長度。
+// 只比較兩邊都已有狀態（非 null）的 K 棒；另記錄子序列仍無狀態、全量已有狀態的最後一根。
+// V1.1：RawDir 的 0 是 NEUTRAL（已知狀態），null 才是資料不足。
 // 用法同 characterize.char.ts（TSP_CHAR_CSV / TSP_CHAR_OUT）。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,7 +39,11 @@ test('start invariance', () => {
         ['SuperTrend(10,2)', { ...base, algo: 'supertrend', stMult: 2 }],
         ['SuperTrend(10,3)', { ...base, algo: 'supertrend', stMult: 3 }],
         ['SuperTrend(10,4)', { ...base, algo: 'supertrend', stMult: 4 }],
-        ['Donchian(20)', { ...base, algo: 'donchian' }],
+        ['Donchian(20)+ATR×2', { ...base, algo: 'donchian', dcAtrMult: 2 }],
+        ['Donchian(20)+ATR×3', { ...base, algo: 'donchian' }],
+        ['Donchian(20)+ATR×4', { ...base, algo: 'donchian', dcAtrMult: 4 }],
+        ['Donchian(10)+ATR×3', { ...base, algo: 'donchian', dcLength: 10 }],
+        ['Donchian(40)+ATR×3', { ...base, algo: 'donchian', dcLength: 40 }],
         ['KAMA(10,2,30)+0.3', { ...base, algo: 'kama' }],
     ];
     const out: string[] = [];
@@ -58,8 +63,8 @@ test('start invariance', () => {
             for (let i = 0; i < 3000; i++) {
                 const a = sub.dir[i]!;
                 const b = full.dir[s + i]!;
-                if (a === 0 && b !== 0) ul = i;
-                if (a === 0 || b === 0) continue;
+                if (a === null && b !== null) ul = i;
+                if (a === null || b === null) continue;
                 if (a !== b) dl = i;
                 const sv = sub.line[i];
                 const fv = full.line[s + i];
