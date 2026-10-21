@@ -39,10 +39,21 @@ for (const [key, value] of params) if (key.startsWith('p.')) {
     if (Number.isFinite(n)) webParams[key.slice(2)] = n;
 }
 if (budgetOverride !== undefined && numeric('p.budget') === undefined) webParams.budget = budgetOverride;
-const customParams = { ...defaults };
+// 和官方編輯器一樣，只宣告使用者有指定的參數。未宣告時由單檔採用本週期預設，
+// 避免把1m微型預設明確送進5m，亦避免legend列出全部參數。
+const customParams: Record<string, number> = {};
 for (const def of TSP_PARAMS) {
-    customParams[def.key] = numeric(`c.${def.key}`) ?? numeric(`p.${def.key}`) ??
-        (def.key === 'budget' ? budgetOverride : undefined) ?? def.def;
+    const value = numeric(`c.${def.key}`) ?? numeric(`p.${def.key}`) ??
+        (def.key === 'budget' ? budgetOverride : undefined);
+    if (value !== undefined) customParams[def.key] = value;
+}
+const customDefs = [...TSP_PARAMS,
+    { key: 'riskHistory', label: '歷史風控', def: 0, min: 0, max: 1 },
+    { key: 'chartTf', label: '主圖分鐘（0自動）', def: 0, min: 0, max: 1440 },
+];
+for (const key of ['riskHistory', 'chartTf']) {
+    const value = numeric(`c.${key}`) ?? numeric(key);
+    if (value !== undefined) customParams[key] = value;
 }
 
 const inst = { ...newInstance(TSP_TYPE), id: 'tsp-demo', params: { ...newInstance(TSP_TYPE).params, ...webParams } };
@@ -62,7 +73,7 @@ if (params.get('custom') === '1' || only === 'custom') {
         short: 'TSP',
         desc: '',
         category: 'overlay',
-        params: TSP_PARAMS.map((def) => ({ ...def, def: customParams[def.key]! })),
+        params: customDefs.filter((def) => def.key in customParams).map((def) => ({ ...def, def: customParams[def.key]! })),
         outputs: probe.order.map((key, i) => ({
             key,
             label: key,
@@ -91,10 +102,7 @@ const timeframeMinutes: Record<string, number> = { '1m': 1, '5m': 5, '15m': 15, 
 const requestedTf = params.get('tf');
 const startingTf = requestedTf && requestedTf in timeframeMinutes ? requestedTf : '5m';
 const chartAudit = params.get('chartAudit') === '1';
-const auditParams = {
-    ...customParams,
-    ...(numeric('riskHistory') === undefined ? {} : { riskHistory: numeric('riskHistory') }),
-};
+const auditParams = customParams;
 
 // ?tf=5m：載入後點主圖週期按鈕；側欄也監聽同一工具列的切換。
 if (requestedTf && requestedTf in timeframeMinutes) {
@@ -142,13 +150,12 @@ function Demo() {
 
     return (
         <div style={{ width: '100vw', height: '100vh', display: 'flex', overflow: 'hidden' }}>
-            <div style={{ flex: 1, minWidth: 0, height: '100%' }}><CandleChart contract={tmf} /></div>
+            <div style={{ flex: 1, minWidth: 0, minHeight: 0, height: '100%', display: 'flex', flexDirection: 'column' }}><CandleChart contract={tmf} /></div>
             {chartAudit && <ChartAudit
                 timeframe={tf}
                 minutes={timeframeMinutes[tf] ?? 5}
                 params={auditParams}
                 source={customSource}
-                budgetOverride={budgetOverride}
             />}
         </div>
     );

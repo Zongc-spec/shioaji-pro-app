@@ -322,7 +322,7 @@ export function TrendSignalPanel({
                                 <div className={s.note}>已忽略 {feed.lateTicks} 筆晚到成交：所屬分鐘已確認，不改寫已收 K 棒</div>
                             )}
                             {feed.streamGaps > 0 && (
-                                <div className={s.note}>逐筆有 {feed.streamGaps} 次中間漏收（累計成交量對不上）：漏收前後的分鐘改以伺服器歷史確認</div>
+                                <div className={s.note}>逐筆累計量有 {feed.streamGaps} 次不連續：未確認的分鐘改以伺服器歷史補齊</div>
                             )}
                         </>
                     )}
