@@ -192,7 +192,20 @@ stale。Dashboard 標「過期」；5m 過期時 1m 不提示。15m／60m 只註
 
 測試：`npm test` 232 files passed／1 skipped、3633 tests passed／2 skipped；`tsc -b`、`vite build` 通過。
 
+### V1.1 補充：桌面版自訂指標版（2026-10-21）
+
+官方桌面版（v0.1.54，與本分支的基線同版）有「自訂指標」：使用者在 App 內貼 JavaScript，執行器
+（`src/lib/custom-runtime.ts`）只給目前主圖週期的 OHLCV 陣列與參數表裡定義的參數，只能用 `plot()` 輸出數值序列（線／虛線／
+柱狀／圓點）與 `hline()`。
+
+**D21 單檔自訂指標版。** [`docs/trend-signal-pro-custom.js`](../trend-signal-pro-custom.js) 把三個 TrendCore、已收棒判定
+（台灣牆鐘 − 10 秒，含收盤定盤寬限）、1m→5m 聚合與投影、1m 微型趨勢、PRICE_STRUCTURE、提示範圍規則照抄成單一檔案（不用
+`ta.*`，避免與原生 ATR 起算方式不同）。全部以圓點輸出：自訂指標沒有箭頭與文字，且折線會在翻轉處互連。沒有 Dashboard、虛擬
+風控、審計與通知。驗證：`src/lib/trend-signal/custom-script.test.ts` 以 App 的自訂指標執行器跑這個檔案，與 `runTrendSignal`
+逐根比對（5m、1m 主圖；三個核心；post-flip、非預設參數；進行中的 K 棒），10 個測試通過；真實 TMF 1m 6.8 萬根每次 30–41 ms。
+回放展示頁 `&only=custom` 走編輯器「儲存」同一條註冊路徑畫出（截圖 `docs/images/trend-signal-pro-custom-1m.png`）。
+
 未完成與待辦：
 
-- 原生桌面 App 未實測（同 P5；需私有 repo 與本機 sidecar）。
+- 原生桌面 App 未實測（同 P5；需私有 repo 與本機 sidecar）。自訂指標版也還沒有在桌面 App 內實際貼上驗證。
 - 進 main 前需依 DEV.md 跑一輪 AI review（`/code-review`）與 QA 驗收；本次只推送開發分支，未開 PR。

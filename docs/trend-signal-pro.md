@@ -15,7 +15,65 @@ Shioaji Pro 的原生內建指標：5m 紅綠趨勢線與 BUY／SELL（主趨勢
 
 ![Trend Signal Pro：Donchian＋ATR，5m 失效後為中性（合成資料回放）](images/trend-signal-pro-demo-donchian.png)
 
-## 加入圖表
+## 在桌面版直接使用（自訂指標版，不必另開網頁）
+
+官方桌面版的「自訂指標」（v0.1.54 已確認可用）可以貼上 [`trend-signal-pro-custom.js`](trend-signal-pro-custom.js)，在原本的 App 裡畫出
+TSP 的趨勢核心與 1m 提示。自訂指標只能輸出數值序列（線、虛線、柱狀、圓點），所以只有圖上的部分：
+
+| 有 | 沒有（請用本分支的原生版） |
+|---|---|
+| 綠／紅趨勢線、BUY／SELL、失效（Donchian＋ATR）、1m 主圖上的微型趨勢與價格結構提示；A／B／C 三種演算法與全部參數 | 箭頭與文字標記（都以圓點表示）、四週期 Dashboard、虛擬風控與 R 線、審計、模擬警示、LIVE／過期徽章 |
+
+計算與原生版相同：`src/lib/trend-signal/custom-script.test.ts` 用 App 的自訂指標執行器跑這個檔案，與原生 Trend Signal Pro 逐根比對
+（5m 與 1m 主圖的每根趨勢線值、BUY／SELL／失效位置、兩種 1m 提示；三種演算法；進行中的 K 棒不產生訊號）。
+真實 TMF 1m 主圖每次計算：約 2.3 萬根（20 天）12–29 ms、約 6.8 萬根（60 天）30–41 ms。
+
+建立步驟：
+
+1. 把程式碼複製到剪貼簿（或用記事本開這個檔案全選複製）：
+
+   **CLI**（Windows PowerShell）
+
+   ```powershell
+   Get-Content -Raw -Encoding UTF8 $HOME\shioaji-pro-app\docs\trend-signal-pro-custom.js | Set-Clipboard
+   ```
+
+2. 桌面版 K 線面板 →「指標」→ 左側「自訂指標」→ 左下「建立自訂指標」。
+3. 名稱填 `Trend Signal Pro`、縮寫 `TSP`、位置選「主圖疊加」；「參數」表的兩個範例參數（fast、slow）按垃圾桶刪掉。
+4. 程式碼欄全選刪除，貼上剪貼簿 → 「驗證」（偵測到 7 條輸出）→「儲存」。
+5. 在「自訂指標」清單點 `Trend Signal Pro` 加入圖表。
+
+要切換演算法或調參數時，在步驟 3 的「參數」表「加參數」，代號用下表（不加就用預設）：
+
+| 代號 | 意義 | 預設 |
+|---|---|---|
+| `algo` | 演算法：0 SuperTrend、1 Donchian＋ATR、2 KAMA | 0 |
+| `stPeriod`／`stMult` | SuperTrend ATR 週期／倍數 | 10／3 |
+| `dcLength`／`dcAtrMult` | Donchian 突破週期／ATR 追蹤帶倍數 | 20／3 |
+| `kamaLength`／`kamaFast`／`kamaSlow`／`kamaHyst` | KAMA 效率比週期／快速／慢速／翻轉遲滯（× ATR14） | 10／2／30／0.3 |
+| `hintWindow` | 1m 提示範圍：0 整段 5m 趨勢、N 翻轉後 N 根 5m | 0 |
+| `microStMult`／`microDcLength`／`microKamaHyst` | 1m 微型趨勢的靈敏度（依演算法） | 3／20／0.3 |
+| `pivotLeft`／`pivotRight`／`minPullbackAtr` | 結構轉折左／右根數、最小回檔（× 1m ATR14） | 2／2／0.5 |
+
+依主圖週期：1m 主圖畫 5m 趨勢（由已收 1m 聚合，每根只看當時已收的 5m）與 1m 提示；5m 主圖畫 5m 趨勢核心；15m、60m 等其他週期畫的是
+該週期自己的趨勢（相當於 Dashboard 的高週期輔助，不是 5m 訊號）。
+
+![自訂指標版在 1m 主圖（合成資料回放）](images/trend-signal-pro-custom-1m.png)
+
+貼進 App 之前想先看樣子，可用回放展示頁的 `&only=custom`（再加 `&tf=1m` 開 1m 主圖；`&c.algo=1` 等設定自訂指標版的參數）。
+
+圓點預設顏色：綠／紅＝多／空趨勢線、青＝BUY、洋紅＝SELL、橘＝失效、淺藍＝1m 微型提示、紫＝1m 結構提示；顏色可在驗證後的輸出列或
+指標樣式裡改。輸出改成「線」時，翻轉處會互相連線（lightweight-charts 的折線不因空值斷開），建議維持「圓點」。
+
+注意：
+
+- 已收 K 棒以電腦時鐘判定（收盤時間 ≤ 現在 − 10 秒，台灣時間）；電腦時間不準時，訊號出現的時機會跟著偏移。
+- 計算只用主圖已載入的 K 棒；最前面是暖身，沒有線與訊號：5m 趨勢 140–150 根 5m（1m 主圖約前 750 根 1m），之後與原生相同。
+- 開「僅日盤」時夜盤 K 棒不在主圖上，5m 趨勢只由日盤計算，會與原生版不同；比對請用全盤。
+- 自訂指標的程式碼在 App 內執行；這個檔案只讀主圖 K 棒與系統時間，沒有網路請求，也不碰任何下單功能。
+- 腳本更新時，到「自訂指標」清單點編輯，重新貼上新版程式碼再儲存。
+
+## 加入圖表（本分支的原生版）
 
 1. K 線面板工具列 →「指標」→ 搜尋 `TSP` 或「趨勢訊號」→ 點「Trend Signal Pro 趨勢訊號」。
 2. 設定視窗可先調參數（圖上即時預覽），按「確定」加入。
