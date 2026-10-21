@@ -16,8 +16,8 @@ import { wallClockToUtc } from '../../../src/lib/utils/kbars';
 import { atr } from '../../../src/lib/indicators';
 import { runTrendSignal } from '../../../src/lib/trend-signal/engine';
 import { DEFAULT_CONFIG } from '../../../src/lib/trend-signal/config';
-import { alignPoints, lastAtOrBefore } from '../../../src/lib/trend-signal/core/bars';
-import { tradingSessionOf } from '../../../src/lib/trend-signal/core/session';
+import { alignPoints, holeBefore, lastAtOrBefore, tfBucket } from '../../../src/lib/trend-signal/core/bars';
+import { isRegularMinute, tradingSessionOf } from '../../../src/lib/trend-signal/core/session';
 import type { EntryMode, RiskConfig, TrendParams, TrendSignalConfig, TrendSignalResult, VirtualTrade } from '../../../src/lib/trend-signal/types';
 import type { Candle } from '../../../src/lib/types/market';
 
@@ -242,6 +242,46 @@ function hintStats(res: TrendSignalResult, mode: EntryMode, p: Period) {
     };
 }
 
+/** 資料完整性（tsp-1.1.1 起缺分鐘的 5m 不參與計算）：不完整的桶、有資料的時段內整桶沒有 1m 的桶、
+ *  5m 桶內缺口之後的 1m（不提示） */
+function dataStats(m1: Candle[], res: TrendSignalResult) {
+    const byMissing: Record<number, number> = {};
+    let night = 0;
+    let lateNight = 0;
+    for (const g of res.gaps) {
+        byMissing[g.missing] = (byMissing[g.missing] ?? 0) + 1;
+        if (tradingSessionOf('FUT', g.label).night) night++;
+        const tod = g.label % 86400;
+        if (tod > 2 * 3600 && tod <= 5 * 3600) lateNight++;
+    }
+    const present = new Set(m1.map((b) => tfBucket(b.time, 5)));
+    const sessions = new Map<string, { start: number; end: number }>();
+    for (const b of m1) {
+        const s = tradingSessionOf('FUT', b.time);
+        if (!sessions.has(s.key)) sessions.set(s.key, s);
+    }
+    let expected = 0;
+    let empty = 0;
+    for (const w of sessions.values()) {
+        const labels = new Set<number>();
+        for (let t = w.start + 60; t <= w.end; t += 60) if (isRegularMinute('FUT', t)) labels.add(tfBucket(t, 5));
+        expected += labels.size;
+        for (const l of labels) if (!present.has(l)) empty++;
+    }
+    return {
+        buckets: res.m5.bars.length + res.gaps.length,
+        incomplete: res.gaps.length,
+        byMissing,
+        night,
+        lateNight,
+        sessions: sessions.size,
+        expectedBuckets: expected,
+        emptyBuckets: empty,
+        holeMinutes: holeBefore(m1, 'FUT').filter(Boolean).length,
+        minutes: m1.length,
+    };
+}
+
 interface Candidate {
     id: string;
     label: string;
@@ -281,6 +321,7 @@ test('gate 5 comparison', () => {
     const json: Record<string, unknown> = { costs: { ...COST, tax: TAX, pointValue: POINT, qty: 1 }, periods: { IS: '2024-09-01..2025-08-31', OOS: '2025-09-01..2026-09-01' } };
     let md = '';
     let regimes: ReturnType<typeof monthRegimes> | null = null;
+    let data: ReturnType<typeof dataStats> | null = null;
     const core: string[] = [];
     const sar: string[] = [];
     const sarSplit: string[] = [];
@@ -291,6 +332,7 @@ test('gate 5 comparison', () => {
     for (const c of cands) {
         const s = run(c.trend, 'IMMEDIATE', { ...risk, stopAtr: 1000 });
         regimes ??= monthRegimes(s);
+        data ??= dataStats(m1, s);
         const entry: Record<string, unknown> = {};
         for (const p of ['IS', 'OOS'] as Period[]) {
             const cs = coreStats(s, p);
@@ -357,6 +399,9 @@ test('gate 5 comparison', () => {
     }
     md += `# Gate 5 公平比較（TMF 1m，${new Date(m1[0]!.time * 1000).toISOString().slice(0, 10)}～${new Date(asOf * 1000).toISOString().slice(0, 10)}）\n\n`;
     md += `成本：手續費 ${COST.feePerSide} 元／邊、滑價 ${COST.slipTicks} tick／邊、期交稅 ${TAX}／邊、每點 ${POINT} 元、1 口。樣本內 2024-09-01～2025-08-31、樣本外 2025-09-01～2026-09-01。不做參數最佳化，不指定最佳；無法直接比較 Universal Indicator 原版。\n\n`;
+    const d = data!;
+    md += `## 0. 資料完整性（5m 只用完整的桶）\n\n有 1m 的 5m 桶 ${int(d.buckets)} 個，缺分鐘 ${d.incomplete} 個（${f((100 * d.incomplete) / d.buckets, 2)}%；缺 1／2／3／4 根：${[1, 2, 3, 4].map((k) => d.byMissing[k] ?? 0).join('／')}；夜盤 ${d.night} 個，其中 02:00–05:00 ${d.lateNight} 個）。有資料的 ${d.sessions} 個時段內整桶沒有 1m：${d.emptyBuckets} 個（應有 ${int(d.expectedBuckets)} 個桶）。5m 桶內缺口之後的 1m（不提示）：${d.holeMinutes} 根（${f((100 * d.holeMinutes) / d.minutes, 2)}%）。\n\n`;
+    json.data = d;
     md += `## 1. TrendCore 性質（翻轉密度、趨勢段長度、反應延遲）\n\n| 候選 | 期間 | 訊號/日 | 失效/日 | 趨勢段中位(5m 根) | 延遲中位(5m 根) | 延遲中位(ATR) | 延遲 P90(ATR) |\n|---|---|---|---|---|---|---|---|\n${core.join('\n')}\n\n`;
     md += `## 2. SAR（IMMEDIATE 進場、只在 5m 反向／失效出場）成本後\n\n| 候選 | 期間 ${statCols}\n|---|---${statSep}\n${sar.join('\n')}\n\n`;
     md += `### 2a. SAR 日盤／夜盤（全期，依成交所在盤）\n\n| 候選 | 盤別 ${statCols}\n|---|---${statSep}\n${sarSplit.join('\n')}\n\n`;
