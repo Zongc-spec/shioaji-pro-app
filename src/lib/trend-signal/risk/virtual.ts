@@ -222,6 +222,8 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
             pendingEntry = null;
             if (t > pe.sessionEnd) {
                 log(t - 60, 'WARN', pe.entry.id, '進場成交 K 棒已跨到下一盤，取消（不跨盤進場）');
+            } else if (t !== pe.entry.barTime + 60) {
+                log(t - 60, 'WARN', pe.entry.id, '下一根 1m 缺資料，取消虛擬進場（不延後到下一根現存 K 棒）');
             } else {
                 const dir = pe.entry.direction;
                 const fill = dir === 'LONG' ? open + slip : open - slip;

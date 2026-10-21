@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCustom, type BarsInput } from '../custom-runtime';
 import type { Candle } from '../types/market';
 import { aggregate, wallClockToUtc } from '../utils/kbars';
-import { DEFAULT_CONFIG } from './config';
+import { configFromParams, DEFAULT_CONFIG } from './config';
+import { projectCustomTsp } from './custom-adapter';
 import { lastAtOrBefore } from './core/bars';
 import { runTrendSignal } from './engine';
 import { sessionLabels, walkBars } from './fixtures.test-harness';
@@ -20,7 +21,9 @@ const SOURCE = readFileSync(resolve(here, '../../../docs/trend-signal-pro-custom
 
 const ALGO_INDEX: Record<TrendAlgoId, number> = { supertrend: 0, donchian: 1, kama: 2 };
 const ALGOS: TrendAlgoId[] = ['supertrend', 'donchian', 'kama'];
-const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示'];
+const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示',
+    '初始停損', '目前停損', '保本價', '1R', '2R', '3R', '虛擬進場多', '虛擬進場空',
+    '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
 
 const labels = sessionLabels('2026-09-01', 4);
 const m1 = walkBars(labels, 11, { regime: 60 });
@@ -80,21 +83,11 @@ describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
     const config = cfgFor(algo);
     const res = native(config, m1, closedAt);
 
-    it('5m 主圖：趨勢線、BUY／SELL、失效', () => {
+    it('5m 主圖不能還原逐分鐘風控，明確提示切換 1m', () => {
         const chart5 = aggregate(m1, 5);
         expect(chart5).toEqual(res.m5.bars);
-        const out = script(chart5, { algo: ALGO_INDEX[algo] }, closedAt);
-        chart5.forEach((_, i) => {
-            const d = res.t5.dir[i];
-            expect(out['多方趨勢線']![i]).toBe(d === 'LONG' ? res.t5.line[i]! : null);
-            expect(out['空方趨勢線']![i]).toBe(d === 'SHORT' ? res.t5.line[i]! : null);
-        });
-        expect(marked(out.BUY!)).toEqual(res.signals.filter((s) => s.kind === 'BUY').map((s) => s.index));
-        expect(marked(out.SELL!)).toEqual(res.signals.filter((s) => s.kind === 'SELL').map((s) => s.index));
-        expect(marked(out['失效']!)).toEqual(res.invalidations.map((x) => x.index));
-        // 5m 主圖不畫 1m 提示
-        expect(marked(out['1m 微型提示']!)).toEqual([]);
-        expect(res.signals.length).toBeGreaterThan(3);
+        setNow(closedAt);
+        expect(runCustom(SOURCE, toInput(chart5), { algo: ALGO_INDEX[algo] }).error).toContain('1m');
     });
 
     it('1m 主圖：5m 投影、訊號位置、MICRO_TREND／PRICE_STRUCTURE 提示', () => {
@@ -106,6 +99,26 @@ describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
 });
 
 describe('其他設定與邊界', () => {
+    it.each(ALGOS.flatMap((algo) => [0, 1, 2].map((entryMode) => [algo, entryMode] as const)))('真正單檔與 Web 共用核心的風控逐值一致：%s / mode %i', (algo, entryMode) => {
+        const params = { algo: ALGO_INDEX[algo], entryMode, qty: 3, budget: 100000, riskHistory: 1 };
+        const web = runTrendSignal({ bars1m: m1, live: null, asOf: end + 240, securityType: 'FUT', symbol: 'TMF', contractMonth: 'CUSTOM',
+            tick: 1, pointValue: 10, taxRate: 0.00002, config: configFromParams(params) });
+        const app = script(m1, params, closedAt);
+        expect(web.trades.length).toBeGreaterThan(0);
+        expect(web.trades.some((t) => t.fills.length > 0)).toBe(true);
+        expect(app).toEqual(projectCustomTsp(web, m1.map((b) => b.time)));
+        for (const trade of web.trades) {
+            const at = m1.findIndex((b) => b.time === trade.fillTime);
+            expect(app[trade.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空']![at]).toBe(trade.fillPrice);
+            expect(app['初始停損']![at]).toBe(trade.plan.stop);
+            expect(trade.realizedNtd).toBeCloseTo(trade.realizedPoints * 10 - trade.costNtd, 8);
+        }
+    });
+
+    it('單檔不包含網路、持久儲存或原生送單入口', () => {
+        expect(SOURCE).not.toMatch(/\b(fetch|XMLHttpRequest|WebSocket|localStorage|__TAURI_INTERNALS__|place_order|cancel_order|update_price)\b/);
+    });
+
     it('post-flip 窗口（hintWindow = 3 根 5m）', () => {
         const res = native(cfgFor('supertrend', (c) => ({ ...c, entry: { ...c.entry, windowBars: 3 } })), m1, closedAt);
         expectOneMinuteParity(res, m1, script(m1, { hintWindow: 3 }, closedAt));

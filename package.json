@@ -6,8 +6,10 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "build": "tsc -b && vite build",
-        "test": "vitest run",
+        "build": "node scripts/build-tsp-custom.mjs --check && tsc -b && vite build",
+        "build:tsp-custom": "node scripts/build-tsp-custom.mjs",
+        "check:tsp-custom": "node scripts/build-tsp-custom.mjs --check",
+        "test": "node scripts/build-tsp-custom.mjs --check && vitest run",
         "preview": "vite preview"
     },
     "dependencies": {

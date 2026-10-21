@@ -50,6 +50,9 @@ const show = async (r: ReactTestRenderer, contract: ContractInfo, extra: Record<
 const arm = async (r: ReactTestRenderer) => { await act(async () => { button(r, '啟用閃電下單').props.onClick(); }); };
 
 beforeEach(() => {
+    // 連動狀態測試使用到期前時刻；不能因實際時鐘跨過固定合約到期日而不再進入確認流程。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-20T10:00:00+08:00'));
     vi.clearAllMocks();
     mocks.store.clear();
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -61,6 +64,7 @@ beforeEach(() => {
 afterEach(async () => {
     for (const r of roots.splice(0)) await act(async () => r.unmount());
     vi.unstubAllGlobals();
+    vi.useRealTimers();
 });
 
 it('a new link key (mapping or group changed, same contract) disarms in the same render and never revives', async () => {

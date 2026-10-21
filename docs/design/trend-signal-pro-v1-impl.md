@@ -359,3 +359,31 @@ Chrome 對 UNC profile 的 cache／DB 有警告；自建 server 與 profile 均�
 原生桌面 App、真實 SSE／網路延遲、券商帳單取整尚未實測；審計分頁互動沒有做瀏覽器自動斷言。
 原有兩年 Gate 5 與實際資料回放仍保留為 `tsp-1.1.1` 的歷史結果，本輪沒有重跑或宣稱為 `1.1.2` 的新績效。
 自訂指標的缺乏凍結／5m 主圖完整性限制維持已揭露範圍；P4 沒有啟用。
+
+## 2026-10-21：Web／App 共用核心與自訂風控（tsp-1.1.3）
+
+使用者授權保留 Web 完整審計介面與官方 App 自訂指標，共用計算核心，先補齊 App 風控再做對照。本輪完成程式、離線對照與 Web 合成回放畫面；**官方 App 內貼上／儲存／載入仍待人工驗證，不能稱原生驗收完成**。
+
+- 新增 `custom-adapter.ts`：僅處理 App 的 1m OHLCV 輸入、收棒時點、微台模型規格驗證與圖上輸出；趨勢、進場、風控、費稅均呼叫現有 `runTrendSignal`／`risk/plan`／`risk/virtual`。`custom-entry.ts` 透過公開 `bars/p/plot` 介面輸出。
+- `npm run build:tsp-custom` 沿用 Vite 打包成一個無外部 import 的 JS（71,384 bytes），取代舊版手寫複製的自訂演算法。`npm test`／`npm run build` 先執行產物新鮮度查核；不同步會失敗。
+- 19 條輸出：原7種趨勢/提示；初始停損、目前停損、保本、1R/2R/3R；虛擬多空進場、保護停損、2R、3R、反轉/失效出場。使用成交所屬1m label定位，停損依 stopHistory 生效，分批出場分欄避免覆蓋。
+- 視覺查核發現歷史風控價位堆疊，改為預設僅顯示目前 OPEN 部位六條風控，空手清除、歷史成交點保留；`riskHistory=1` 可查歷史，該參數不影響核心計算。圓點不跨空手期間接線。
+- 獨審發現既有虛擬進場會在下一分鐘缺棒時延後到下一根現存棒成交。修正為取消與 WARN，計算版升 `tsp-1.1.3`，避免與舊ID混用。跨盤取消仍保留。
+- 固定微台模型預設 tick1、每點10元、單邊手續費12元、稅率0.00002、滑價1tick/邊；不自動識別主圖商品或實際持倉。只支援1m主圖；規格/資料非法會報錯。
+
+### 驗證與失敗紀錄
+
+- `npm run build:tsp-custom` exit0；`npm test -- --maxWorkers=2 src/lib/trend-signal/custom-adapter.test.ts src/lib/trend-signal/custom-script.test.ts src/lib/trend-signal/risk/risk.test.ts src/lib/trend-signal/safety.test.ts src/components/trend-signal-panel.test.ts` 初版122 passed、exit0。
+- 真正單檔經 App `runCustom` 執行器，三核心×三進場模式與直接 Web 引擎的19序列比對；單檔測試22 passed、exit0。另有手刻停損/成交反例，不只比較同一投影函式。
+- 完整測試第一次 exit1：3734 passed、1 failed、2 skipped。失敗是既有 `flash-order-link.test.tsx` 的 CDFJ6 固定最後交易日恰為今日，實際時鐘過13:30後 mock確認流程被到期守門拒絕，guard未建立。僅將此測試 beforeEach 固定到期前日期、afterEach 還原 Date，未改送單實作；定向77 passed、exit0。
+- 最終 `npm test -- --maxWorkers=2`：236檔 passed／1檔 skipped，**3736 passed／2 skipped**，exit0（49.93s）。`npm run build`（產物查核、`tsc -b`、`vite build`）exit0；保留既有target／dynamic-import警告。詳細stdout在 `/tmp/tsp-shared-risk-full-tests-final.log`、`/tmp/tsp-shared-risk-build-final.log`。
+- 獨立 `trading_auditor` 使用自行產生的1800棒、3核心×4進場模式：202筆虛擬交易／491筆出場，19輸出與獨立時間/stopHistory oracle一致；84個盤中prefix驗無回填。另驗缺下一分鐘取消、正常/跨盤/live、同棒停損優先與3口完整費稅，exit0。初次300棒沒有成交，不當風控證據，改用非零成交資料；顯示模式補審14情境／28次新版單檔執行，exit0。探針只在記憶體執行，沒有實際券商或原生App驗收。
+- Web目視使用隔離demo／合成資料，同一回放時點2026-08-27 02:00，截圖 `images/trend-signal-pro-custom-risk-1.1.3.png` 與 `images/trend-signal-pro-custom-risk-1.1.3-web.png`，1600×1200。模型有OPEN虛擬多單，右側審計與圖上價位可對照；畫面行情未連線，數字不代表實績。QA自建Vite/Chrome已清理。
+
+### 交付與限制
+
+單檔 SHA256 `0a19cdfdb255a2551b27694d6183bb558459c135be098f2d1906b685e350b0f2`，已逐byte同步到 `C:\Users\zongc\shioaji-pro-app\docs\trend-signal-pro-custom.js`，舊檔備份與回條在 `/home/zongc/tw-futures-codex/.local/tsp-custom-delivery/`；程式碼已複製到Windows剪貼簿。未變更Windows checkout的其他檔案。
+
+原生UI輔助腳本以 `powershell.exe -NoProfile -NonInteractive -STA -File` 載入WSL UNC路徑時，被Windows未簽章／RemoteSigned規則拒絕（exit1）。沒有改執行原則或操作App；改提供官方App內標準貼上／驗證／儲存流程。建立時選微台、1m、全盤、主圖疊加，預期偵測19輸出；請使用新名稱保留既有指標。
+
+沒有讀取券商憑證、重新登入、啟停正式App/sidecar、送改撤單或啟用自動交易。App沒有Web Feed的已確認資料凍結，歷史修訂、載入起點、僅日盤與收棒時點不同都可能造成差異。已持倉遇缺分鐘的觸價未知仍保留；這輪未重跑真實兩年Gate5，不改寫舊比較結果。Web審計與完整App UI/真實行情驗收範圍分開。

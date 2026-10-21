@@ -318,6 +318,16 @@ describe('虛擬部位', () => {
         const other = run(m1, [BUY], [entry(BUY)], { invalidations: [{ ...inv, from: 'SHORT' }] });
         expect(other.trades[0]!.status).toBe('OPEN');
     });
+    it('下一分鐘缺棒時取消待進場，不延後到下一根現存 K 棒成交', () => {
+        const complete = scenario([[100, 105, 95, 100], [100, 105, 95, 100]]);
+        expect(run(complete, [BUY], [entry(BUY)]).trades[0]!.fillTime).toBe(t0 + 2460);
+        const missing = complete.filter((b) => b.time !== t0 + 2460);
+        const v = run(missing, [BUY], [entry(BUY)]);
+        expect(v.trades).toEqual([]);
+        expect(v.pendingEntry).toBeNull();
+        expect(v.events.some((e) => e.kind === 'WARN' && e.text.includes('下一根 1m 缺資料'))).toBe(true);
+        expect(v.events.some((e) => e.kind === 'FILL')).toBe(false);
+    });
     it('同一段趨勢多次提示：持倉中略過；停損出場後下一次提示可再進場', () => {
         // 第 1 次提示 09:40 → 09:41 成交；第 2 次 09:41 在持倉中 → 略過；09:42 觸及停損 71；
         // 第 3 次 09:43 → 09:44 開盤再進場
