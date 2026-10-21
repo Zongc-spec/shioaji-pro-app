@@ -1,6 +1,6 @@
 // src/components/trend-signal-mini-chart.tsx — Trend Signal Pro 的 1m 小圖（主圖右側欄）：
-// 最近 120 根已收 1m K 棒、1m 微型趨勢線（綠／紅）、5m 訊號與各進場時機、虛擬出場標記。
-// 只顯示，不吃任何點擊下單。
+// 最近 120 根已收 1m K 棒、1m 微型趨勢線（綠／紅，與 5m 同一演算法）、5m 訊號與失效、
+// 各模式的 1m 提示、虛擬出場標記。只顯示，不吃任何點擊下單。
 
 import {
     CandlestickSeries,
@@ -18,13 +18,13 @@ import {
 } from 'lightweight-charts';
 import { useEffect, useRef } from 'react';
 import type { TrendSignalResult } from '../lib/trend-signal/types';
-import { splitTrendLines } from '../lib/trend-signal/project';
+import { MODE_TAG, splitTrendLines } from '../lib/trend-signal/project';
 import { exitText } from '../lib/trend-signal/risk/virtual';
 import type { ChartColors } from '../lib/theme-store';
 import * as s from './trend-signal-panel.css';
 
 const BARS = 120;
-const TAG = { IMMEDIATE: 'I', MICRO_TREND: 'M', PRICE_STRUCTURE: 'S', PULLBACK_KD: 'K' } as const;
+const ALGO_TEXT = { supertrend: 'SuperTrend', donchian: 'Donchian＋ATR', kama: 'KAMA' } as const;
 
 export function TrendSignalMiniChart({ result, colors, onClose }: { result: TrendSignalResult | null; colors: ChartColors; onClose: () => void }) {
     const hostRef = useRef<HTMLDivElement>(null);
@@ -98,10 +98,14 @@ export function TrendSignalMiniChart({ result, colors, onClose }: { result: Tren
             const long = sig.direction === 'LONG';
             markers.push({ time: sig.barTime as UTCTimestamp, position: long ? 'belowBar' : 'aboveBar', shape: long ? 'arrowUp' : 'arrowDown', color: long ? '#1fd286' : '#ff4d6a', text: `5m ${sig.kind}` });
         }
+        for (const x of result.invalidations) {
+            if (!times.has(x.barTime)) continue;
+            markers.push({ time: x.barTime as UTCTimestamp, position: x.from === 'LONG' ? 'aboveBar' : 'belowBar', shape: 'square', color: '#e0a43c', text: '5m 失效' });
+        }
         for (const e of result.entries) {
-            if (e.status !== 'TRIGGERED' || e.barTime === null || e.mode === 'IMMEDIATE' || !times.has(e.barTime)) continue;
+            if (e.mode === 'IMMEDIATE' || !times.has(e.barTime)) continue;
             const long = e.direction === 'LONG';
-            markers.push({ time: e.barTime as UTCTimestamp, position: long ? 'belowBar' : 'aboveBar', shape: 'circle', color: '#19b6c9', text: TAG[e.mode] });
+            markers.push({ time: e.barTime as UTCTimestamp, position: long ? 'belowBar' : 'aboveBar', shape: 'circle', color: '#19b6c9', text: MODE_TAG[e.mode] });
         }
         for (const t of result.trades) {
             for (const f of t.fills) {
@@ -116,7 +120,9 @@ export function TrendSignalMiniChart({ result, colors, onClose }: { result: Tren
     return (
         <div className={s.miniColumn}>
             <div className={s.miniHeader}>
-                <span className={s.headerTitle}>1m 微型趨勢（SuperTrend）· M 微型 S 結構（立即＝5m 箭頭）</span>
+                <span className={s.headerTitle} title='1m 參數獨立、雜訊比 5m 多；1m 提示只是 5m 方向內的執行候選，不是 BUY／SELL'>
+                    1m 微型趨勢（{result ? ALGO_TEXT[result.t1.algo] : '—'}）· M 微型 S 結構 K 舊假說（立即＝5m 箭頭）
+                </span>
                 <button className={s.btn} onClick={onClose} title='關閉 1m 小圖'>×</button>
             </div>
             <div ref={hostRef} className={s.miniHost} />

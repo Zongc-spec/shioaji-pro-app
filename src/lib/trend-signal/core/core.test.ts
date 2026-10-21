@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { aggregate } from '../../utils/kbars';
 import { pathBars, sessionLabels, T, walkBars } from '../fixtures.test-harness';
-import { buildTf, confirmed1m, firstAfter, lastAtOrBefore } from './bars';
+import { buildTf, confirmed1m, firstAfter, freshAt, lastAtOrBefore, tfBucket } from './bars';
 import { composeBars, mergeTick, minuteLabel, rebaseTail } from './live';
 import { isSessionOpen, tradingSessionOf } from './session';
 
@@ -52,12 +52,33 @@ describe('buildTf', () => {
         const early = T('2026-10-19T13:46:00');
         expect(buildTf(confirmed1m(bars, early), 60, 'FUT', early).bars.at(-1)!.time).toBe(T('2026-10-19T13:00:00'));
     });
-    it('每根記錄所屬交易時段（夜盤跨午夜同一個 key）', () => {
+    it('每根記錄所屬交易時段與其收盤（夜盤跨午夜同一個 key）', () => {
         const s = buildTf(bars, 5, 'FUT', Infinity);
         const i = s.bars.findIndex((b) => b.time === T('2026-10-20T00:05:00'));
         const j = s.bars.findIndex((b) => b.time === T('2026-10-19T15:05:00'));
         expect(s.session[i]).toBe('2026-10-19N');
         expect(s.session[j]).toBe('2026-10-19N');
+        expect(s.sessionEnd[i]).toBe(T('2026-10-20T05:00:00'));
+        expect(s.sessionEnd[s.bars.findIndex((b) => b.time === T('2026-10-19T09:00:00'))]).toBe(T('2026-10-19T13:45:00'));
+    });
+});
+
+describe('freshAt（MtfContext 的過期判定）', () => {
+    it('盤中：最後一根是前一個桶就不過期', () => {
+        expect(tfBucket(T('2026-10-20T09:07:00'), 5)).toBe(T('2026-10-20T09:10:00'));
+        expect(freshAt(T('2026-10-20T09:05:00'), T('2026-10-20T09:07:00'), 5)).toBe(true);
+        expect(freshAt(T('2026-10-20T09:10:00'), T('2026-10-20T09:10:00'), 5)).toBe(true);
+    });
+    it('換盤：新盤第一根 5m 收棒前，上一盤的 5m 過期（隔夜、午休）', () => {
+        expect(freshAt(T('2026-10-20T05:00:00'), T('2026-10-20T08:46:00'), 5)).toBe(false);
+        expect(freshAt(T('2026-10-20T05:00:00'), T('2026-10-20T08:50:00'), 5)).toBe(false);
+        expect(freshAt(T('2026-10-20T08:50:00'), T('2026-10-20T08:51:00'), 5)).toBe(true);
+        expect(freshAt(T('2026-10-20T13:45:00'), T('2026-10-20T15:01:00'), 5)).toBe(false);
+    });
+    it('資料缺洞：缺整根 5m 即過期；沒有資料也算過期', () => {
+        expect(freshAt(T('2026-10-20T09:00:00'), T('2026-10-20T09:07:00'), 5)).toBe(false);
+        expect(freshAt(null, T('2026-10-20T09:07:00'), 5)).toBe(false);
+        expect(freshAt(T('2026-10-20T09:00:00'), T('2026-10-20T09:40:00'), 60)).toBe(true);
     });
 });
 

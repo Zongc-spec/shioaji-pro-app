@@ -1,13 +1,14 @@
 // src/lib/trend-signal/risk/risk.test.ts — 虛擬風控：停損依據、R 在成交後固定、tick 取整、
-// 新臺幣預算與口數（TMF／MTX 每點價值不同）、整數口數分層、移動停損只往有利方向，
-// 以及虛擬部位的成交、停損優先、保本、分批停利、5m 反向立即出場、不跨盤、不加碼。
+// 新臺幣預算與口數（TMF／MTX 每點價值不同）、期交稅、整數口數分層、移動停損只往有利方向，
+// 以及虛擬部位的成交、停損優先、保本、分批停利、5m 反向／失效立即出場、不跨盤、
+// 同段趨勢多次提示（持倉時略過、停損後可再進場）。
 import { describe, expect, it } from 'vitest';
 import type { Candle } from '../../types/market';
 import { buildTf } from '../core/bars';
 import { DEFAULT_CONFIG } from '../config';
 import { T } from '../fixtures.test-harness';
-import type { EntryEvent, RiskConfig, TrendDir, TrendSignal, TrendTrack } from '../types';
-import { allocateTiers, ceilTick, floorTick, planRisk, swingPoint, trailStop } from './plan';
+import type { EntryEvent, RiskConfig, TrendInvalidation, TrendSignal, TrendState, TrendTrack } from '../types';
+import { allocateTiers, ceilTick, floorTick, futuresTax, planRisk, roundTripCost, swingPoint, trailStop } from './plan';
 import { runVirtual } from './virtual';
 
 const R: RiskConfig = DEFAULT_CONFIG.risk;
@@ -60,6 +61,15 @@ describe('planRisk', () => {
     it('成交後重新定價固定口數；超出預算只標示，不假裝在預算內', () => {
         const p = planRisk({ direction: 'LONG', entry: 20000, entryBasis: 'fill', swing: 19900, atr: 10, tick: 1, pointValue: 10, cfg: R, fixedQty: 1 });
         expect(p).toMatchObject({ status: 'OK', qty: 1, overBudget: true });
+    });
+    it('期交稅：契約價值 × 稅率，元以下四捨五入；計入來回成本與保本價', () => {
+        expect(futuresTax(23000, 10, 0.00002)).toBe(5); // 4.6 → 5
+        expect(futuresTax(20000, 10, 0.00002, 3)).toBe(12);
+        expect(futuresTax(20000, 10, 0)).toBe(0);
+        expect(roundTripCost(R, 1, 10, 20000, 0.00002)).toBe(24 + 20 + 8);
+        const p = planRisk({ ...base, direction: 'LONG', entry: 20000, entryBasis: 'estimate', swing: 19980, atr: 10, taxRate: 0.00002 });
+        expect(p.costPoints).toBeCloseTo(5.2, 10);
+        expect(p.breakevenStop).toBe(20006);
     });
 });
 
@@ -129,33 +139,42 @@ const sig = (kind: 'BUY' | 'SELL', index: number, barTime: number, sessionEnd = 
     close: 100,
     line: undefined,
     atr: undefined,
-    notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null },
+    notes: { ema: 'UNKNOWN', m15: 'UNKNOWN', m60: 'UNKNOWN', m15Align: 'NEUTRAL', m60Align: 'NEUTRAL', m15BarTime: null, m60BarTime: null, m15Stale: false, m60Stale: false },
 });
-const entry = (s: TrendSignal, barTime = s.barTime, refPrice = 100): EntryEvent => ({
-    id: `${s.id}|IMMEDIATE`,
+const entry = (s: TrendSignal, barTime = s.barTime, refPrice = 100, seq = 1): EntryEvent => ({
+    id: `${s.id}|IMMEDIATE|${barTime}`,
+    kind: s.direction === 'LONG' ? 'POTENTIAL_ENTRY_LONG' : 'POTENTIAL_ENTRY_SHORT',
     mode: 'IMMEDIATE',
     signalId: s.id,
     direction: s.direction,
-    status: 'TRIGGERED',
     barTime,
     refPrice,
-    windowEnd: s.barTime + 900,
+    seq,
     reason: 'test',
 });
-function run(m1: Candle[], signals: TrendSignal[], entries: EntryEvent[], opts: { cfg?: Partial<RiskConfig>; live?: Candle; dirs?: TrendDir[] } = {}) {
-    const m5 = buildTf(m1, 5, 'FUT', m1.at(-1)!.time);
-    const t5: TrendTrack = { tf: 5, algo: 'supertrend', line: m5.bars.map(() => undefined), dir: opts.dirs ?? m5.bars.map(() => 'UP'), stopLine: true };
+function run(
+    m1: Candle[],
+    signals: TrendSignal[],
+    entries: EntryEvent[],
+    opts: { cfg?: Partial<RiskConfig>; live?: Candle; dirs?: TrendState[]; invalidations?: TrendInvalidation[]; taxRate?: number } = {},
+) {
+    const asOf = m1.at(-1)!.time;
+    const m5 = buildTf(m1, 5, 'FUT', asOf);
+    const t5: TrendTrack = { tf: 5, algo: 'supertrend', line: m5.bars.map(() => undefined), dir: opts.dirs ?? m5.bars.map(() => 'LONG'), stopLine: true };
     return runVirtual({
         m1,
+        m1SessionEnd: buildTf(m1, 1, 'FUT', asOf).sessionEnd,
         live: opts.live ?? null,
-        asOf: m1.at(-1)!.time,
+        asOf,
         m5,
         t5,
         signals,
+        invalidations: opts.invalidations ?? [],
         entries,
         cfg: { ...R, ...opts.cfg },
         tick: 1,
         pointValue: 10,
+        taxRate: opts.taxRate ?? 0,
         key: 'k',
     });
 }
@@ -197,7 +216,7 @@ describe('虛擬部位', () => {
     it('規格案例 2：5m 確認反向 → 下一根 1m 開盤平倉，不等 1m；平倉本身不開反向部位', () => {
         const m1 = scenario([[100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [98, 105, 95, 100]]);
         const SELL = sig('SELL', 8, t0 + 2700); // 5m 09:45
-        const dirs: TrendDir[] = [...Array(8).fill('UP'), 'DOWN'];
+        const dirs: TrendState[] = [...Array(8).fill('LONG'), 'SHORT'];
         const v = run(m1, [BUY, SELL], [entry(BUY)], { dirs });
         expect(v.trades).toHaveLength(1);
         expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, price: 97, qty: 1, reason: 'REVERSAL' }]);
@@ -232,5 +251,38 @@ describe('虛擬部位', () => {
         const v = run(m1, [BUY, other], [entry(BUY), entry(other)]);
         expect(v.trades).toHaveLength(1);
         expect(v.events.some((e) => e.text.includes('不加碼'))).toBe(true);
+    });
+    it('已實現損益扣手續費與期交稅（兩邊各自以成交價計）', () => {
+        const hit = run(scenario([[100, 105, 95, 100], [100, 100, 70, 75]]), [BUY], [entry(BUY)], { taxRate: 0.01 }).trades[0]!;
+        // 停損 70、進場 101：稅 = round(101 × 10 × 1%) + round(70 × 10 × 1%) = 10 + 7
+        expect(hit.realizedNtd).toBe((70 - 101) * 10 - 24 - 17);
+    });
+    it('5m 趨勢失效（→ NEUTRAL）→ 下一根 1m 開盤平倉，不等 1m', () => {
+        const m1 = scenario([[100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [98, 105, 95, 100]]);
+        const inv: TrendInvalidation = { id: 'inv-8', barTime: t0 + 2700, index: 8, from: 'LONG' };
+        const v = run(m1, [BUY], [entry(BUY)], { dirs: [...Array(8).fill('LONG'), 'NEUTRAL'], invalidations: [inv] });
+        expect(v.trades[0]!.fills).toEqual([{ time: t0 + 2760, price: 97, qty: 1, reason: 'TREND_INVALID' }]);
+        // 反方向的失效（空方失效）與多單無關
+        const other = run(m1, [BUY], [entry(BUY)], { invalidations: [{ ...inv, from: 'SHORT' }] });
+        expect(other.trades[0]!.status).toBe('OPEN');
+    });
+    it('同一段趨勢多次提示：持倉中略過；停損出場後下一次提示可再進場', () => {
+        // 第 1 次提示 09:40 → 09:41 成交；第 2 次 09:41 在持倉中 → 略過；09:42 觸及停損 71；
+        // 第 3 次 09:43 → 09:44 開盤再進場
+        const m1 = scenario([[100, 105, 95, 100], [100, 100, 60, 65], [65, 70, 60, 66], [66, 70, 60, 66], [66, 70, 60, 66]]);
+        const hints = [entry(BUY), entry(BUY, t0 + 2460, 100, 2), entry(BUY, t0 + 2580, 66, 3)];
+        const v = run(m1, [BUY], hints);
+        expect(v.trades.map((t) => [t.fillTime, t.entryId])).toEqual([[t0 + 2460, hints[0]!.id], [t0 + 2640, hints[2]!.id]]);
+        expect(v.trades[0]!.exitReason).toBe('STOP');
+        expect(v.events.filter((e) => e.kind === 'WARN' && e.text.includes('略過')).map((e) => e.ref)).toEqual([hints[1]!.id]);
+    });
+    it('提示所在盤決定能否成交：整段趨勢延續到下一盤時，提示在新盤內即可成交', () => {
+        const dayEnd = T('2026-10-20T13:45:00');
+        const day = Array.from({ length: 20 }, (_, i) => bar(dayEnd - 60 * (19 - i), 100, 110, 90, 100));
+        const night = Array.from({ length: 20 }, (_, i) => bar(T('2026-10-20T15:01:00') + 60 * i, 100, 110, 90, 100));
+        const m1 = [...day, ...night];
+        const s = sig('BUY', 1, T('2026-10-20T13:35:00'), dayEnd);
+        const v = run(m1, [s], [entry(s, T('2026-10-20T15:10:00'), 100, 2)]);
+        expect(v.trades[0]).toMatchObject({ fillTime: T('2026-10-20T15:11:00'), status: 'OPEN' });
     });
 });

@@ -8,7 +8,7 @@ import type { IndicatorPoint } from '../../indicators';
 import type { SecurityType } from '../../types/contract';
 import type { Candle } from '../../types/market';
 import { aggregate } from '../../utils/kbars';
-import { tradingSessionOf } from './session';
+import { tradingSessionOf, type TradingSession } from './session';
 import type { TfMinutes, TfSeries } from '../types';
 
 /** label ≤ asOf 的 1m K 棒才算已收。回傳新陣列：未排序或 label 重複
@@ -41,17 +41,18 @@ export function buildTf(
     secType: SecurityType,
     asOf: number,
 ): TfSeries {
-    const sessionOfLabel = new Map<number, string>();
-    const sessionKey = (label: number) => {
-        let k = sessionOfLabel.get(label);
-        if (k === undefined) {
-            k = tradingSessionOf(secType, label).key;
-            sessionOfLabel.set(label, k);
+    const sessionOfLabel = new Map<number, TradingSession>();
+    const sessionOf = (label: number) => {
+        let s = sessionOfLabel.get(label);
+        if (s === undefined) {
+            s = tradingSessionOf(secType, label);
+            sessionOfLabel.set(label, s);
         }
-        return k;
+        return s;
     };
     if (tf === 1) {
-        return { tf, bars: m1, lastMinute: m1.map((b) => b.time), session: m1.map((b) => sessionKey(b.time)) };
+        const ss = m1.map((b) => sessionOf(b.time));
+        return { tf, bars: m1, lastMinute: m1.map((b) => b.time), session: ss.map((s) => s.key), sessionEnd: ss.map((s) => s.end) };
     }
     const bars = aggregate(m1, tf);
     // 與 aggregate() 同一個收盤 label 公式，逐桶記下最後一根 1m
@@ -67,19 +68,21 @@ export function buildTf(
         }
         lastMinute[j] = c.time;
     }
-    const session = lastMinute.map((t) => sessionKey(t));
+    const ss = lastMinute.map((t) => sessionOf(t));
+    const session = ss.map((s) => s.key);
+    const sessionEnd = ss.map((s) => s.end);
     const n = bars.length;
     if (n > 0) {
         const lastLabel = bars[n - 1]!.time;
-        const lm = lastMinute[n - 1]!;
-        const closedAt = tradingSessionOf(secType, lm).end + CLOSE_GRACE;
+        const closedAt = sessionEnd[n - 1]! + CLOSE_GRACE;
         if (!(lastLabel <= asOf || asOf >= closedAt)) {
             bars.pop();
             lastMinute.pop();
             session.pop();
+            sessionEnd.pop();
         }
     }
-    return { tf, bars, lastMinute, session };
+    return { tf, bars, lastMinute, session, sessionEnd };
 }
 
 /** IndicatorPoint[]（以時間為鍵）→ 與 bars 對齊的陣列 */
@@ -109,4 +112,16 @@ export function lastAtOrBefore(bars: Candle[], t: number): number {
 /** 第一根 label > t 的索引；沒有回 bars.length */
 export function firstAfter(bars: Candle[], t: number): number {
     return lastAtOrBefore(bars, t) + 1;
+}
+
+/** 時點 t 所在的 tf 分鐘收盤桶（與 aggregate() 同一個 label 公式） */
+export function tfBucket(t: number, tf: number): number {
+    const sec = tf * 60;
+    return Math.ceil(t / sec) * sec;
+}
+
+/** 時點 t 已知的最後一根 tf K 棒（label ≤ t）是否就是前一個桶或更新。否則中間缺了
+ *  整根（換盤、資料缺洞），那根的狀態已過期，不能當「現在」的狀態用。 */
+export function freshAt(lastLabel: number | null | undefined, t: number, tf: number): boolean {
+    return lastLabel !== null && lastLabel !== undefined && lastLabel >= tfBucket(t, tf) - tf * 60;
 }

@@ -12,7 +12,7 @@ import { runTrendSignal } from '../lib/trend-signal/engine';
 import type { TrendSignalResult } from '../lib/trend-signal/types';
 import type { ContractBase, ContractInfo } from '../lib/types/contract';
 import type { Candle } from '../lib/types/market';
-import { futuresPointValue } from '../lib/utils/contract-cost';
+import { futuresPointValue, futuresTaxRate } from '../lib/utils/contract-cost';
 import { dateStrOffset, kbarsToCandles, nowWallClockUtc, wallClockToUtc } from '../lib/utils/kbars';
 import { tickSizeFor } from '../lib/utils/ticksize';
 
@@ -129,6 +129,7 @@ export function useTrendSignal(
                 contractMonth: c.delivery_month ?? contract.target_code ?? contract.code,
                 tick: tickSizeFor(c, lt?.price ?? last.close),
                 pointValue: futuresPointValue(c),
+                taxRate: contract.security_type === 'FUT' ? futuresTaxRate(c.root ?? c.category ?? '') : 0,
                 config,
             });
             doneRef.current = { minute, tickSeq: tickSeqRef.current, at: now, inputs };

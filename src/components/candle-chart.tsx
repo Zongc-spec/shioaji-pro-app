@@ -1415,10 +1415,10 @@ export function CandleChart({
         };
     }, [dataVersion, instancesKey, themeKey, tf.minutes, customVer, tspLineKey]);
 
-    // Trend Signal Pro 標記：BUY/SELL 箭頭、風控採用模式的進場點、虛擬出場（依原始收棒
-    // 時間落在包含它的主圖 K 棒）
+    // Trend Signal Pro 標記：5m BUY/SELL 箭頭、5m 失效、風控採用模式的 1m 提示、虛擬出場
+    // （依原始收棒時間落在包含它的主圖 K 棒）
     const tspMarkerKey = tspResult
-        ? `${tspResult.signals.length}|${tspResult.entries.filter((e) => e.status === 'TRIGGERED').length}|${tspResult.trades.reduce((n, t) => n + t.fills.length, 0)}|${tspResult.trades.length}|${tspConfig.entry.mode}`
+        ? `${tspResult.signals.length}|${tspResult.invalidations.length}|${tspResult.entries.length}|${tspResult.trades.reduce((n, t) => n + t.fills.length, 0)}|${tspResult.trades.length}|${tspConfig.entry.mode}`
         : 'none';
     useEffect(() => {
         const plugin = tspMarkersRef.current;
@@ -2455,8 +2455,10 @@ function drawingPnlPerPoint(
 function tspMarker(m: TspMarker): SeriesMarker<Time> {
     const time = m.time as UTCTimestamp;
     switch (m.kind) {
-        case 'BUY': return { time, position: 'belowBar', shape: 'arrowUp', color: '#1fd286', text: 'BUY' };
-        case 'SELL': return { time, position: 'aboveBar', shape: 'arrowDown', color: '#ff4d6a', text: 'SELL' };
+        case 'BUY': return { time, position: 'belowBar', shape: 'arrowUp', color: '#1fd286', text: m.text };
+        case 'SELL': return { time, position: 'aboveBar', shape: 'arrowDown', color: '#ff4d6a', text: m.text };
+        case 'INVALID_LONG': return { time, position: 'aboveBar', shape: 'square', color: '#e0a43c', text: m.text };
+        case 'INVALID_SHORT': return { time, position: 'belowBar', shape: 'square', color: '#e0a43c', text: m.text };
         case 'ENTRY_LONG': return { time, position: 'belowBar', shape: 'circle', color: '#19b6c9', text: m.text };
         case 'ENTRY_SHORT': return { time, position: 'aboveBar', shape: 'circle', color: '#19b6c9', text: m.text };
         case 'EXIT_LONG': return { time, position: 'aboveBar', shape: 'square', color: '#8b94a7', text: m.text };

@@ -71,7 +71,7 @@ function mount(props: any) {
 const text = (n: ReactTestInstance | string): string => (typeof n === 'string' ? n : n.children.map(text).join(''));
 const hasText = (r: ReactTestRenderer, s: string) => r.root.findAll((n) => typeof n.type === 'string' && text(n).includes(s)).length > 0;
 const tfButton = (r: ReactTestRenderer, label: string) => r.root.findAll((n) => n.type === 'button' && text(n) === label)[0]!;
-const lastSignalMarkers = () => (m.markers.at(-1) ?? []).filter((x) => x.text === 'BUY' || x.text === 'SELL');
+const lastSignalMarkers = () => (m.markers.at(-1) ?? []).filter((x) => x.text === '5m BUY' || x.text === '5m SELL');
 
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -102,7 +102,7 @@ describe('Trend Signal Pro 原生指標', () => {
         expect(INDICATOR_DEFS).toContain(def);
         expect(def.category).toBe('overlay');
         expect(instanceLabel(newInstance(TSP_TYPE))).toBe('TSP(ST 10×3)');
-        expect(instanceLabel({ ...newInstance(TSP_TYPE), params: { ...newInstance(TSP_TYPE).params, algo: 1 } })).toBe('TSP(DC 20)');
+        expect(instanceLabel({ ...newInstance(TSP_TYPE), params: { ...newInstance(TSP_TYPE).params, algo: 1 } })).toBe('TSP(DC 20+ATR×3)');
     });
 
     it('載入 20 天 canonical 1m：畫趨勢線、BUY/SELL 標記、Dashboard 與虛擬風控面板；不下單', async () => {

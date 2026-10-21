@@ -45,9 +45,20 @@ export function swingPoint(bars: Candle[], m: number, n: number, dir: Direction)
     return best;
 }
 
-/** 單口來回成本（新臺幣）：手續費兩邊 + 滑價緩衝兩邊 */
-export function roundTripCost(cfg: Pick<RiskConfig, 'feePerSide' | 'slipTicks'>, tick: number, pointValue: number): number {
-    return 2 * cfg.feePerSide + 2 * cfg.slipTicks * tick * pointValue;
+/** 單邊期交稅（新臺幣，元以下四捨五入）：契約價值 × 稅率 */
+export function futuresTax(price: number, pointValue: number, taxRate: number, qty = 1): number {
+    return taxRate > 0 ? Math.round(price * pointValue * qty * taxRate) : 0;
+}
+
+/** 單口來回成本（新臺幣）：手續費兩邊 + 滑價緩衝兩邊 + 期交稅兩邊（以進場價估） */
+export function roundTripCost(
+    cfg: Pick<RiskConfig, 'feePerSide' | 'slipTicks'>,
+    tick: number,
+    pointValue: number,
+    price = 0,
+    taxRate = 0,
+): number {
+    return 2 * cfg.feePerSide + 2 * cfg.slipTicks * tick * pointValue + 2 * futuresTax(price, pointValue, taxRate);
 }
 
 /** 依口數分配 2R／3R／追蹤三層（整數、加總等於口數、不產生零口以外的負數） */
@@ -79,6 +90,8 @@ export interface PlanInput {
     atr: number | undefined;
     tick: number;
     pointValue: number | null;
+    /** 期交稅率（單邊）；省略 = 不計 */
+    taxRate?: number;
     cfg: RiskConfig;
     /** 已成交口數：成交後以成交價重新定價時固定口數，超出預算只標示 overBudget */
     fixedQty?: number;
@@ -133,7 +146,7 @@ export function planRisk(inp: PlanInput): RiskPlan {
     const riskPoints = fix(sign * (entry - stop), tick);
     if (!(riskPoints > 0)) return { ...base, atrStop, stop, stopBasis: basis, reason: '停損不在進場價的保護側' };
     const pv = inp.pointValue;
-    const cost = roundTripCost(cfg, tick, pv);
+    const cost = roundTripCost(cfg, tick, pv, entry, inp.taxRate ?? 0);
     const costPoints = cost / pv;
     const riskPerLot = riskPoints * pv + cost;
     const affordable = Math.floor(cfg.budget / riskPerLot + EPS);
@@ -165,8 +178,9 @@ export function planRisk(inp: PlanInput): RiskPlan {
     return { ...plan, status: 'OK', tiers: allocateTiers(qty, cfg) };
 }
 
-/** 移動停損（多）：max(舊停損, 5m SuperTrend 支撐 − 1 tick, 入場後最高價 − trailAtr × 5m ATR)。
- *  缺少的來源不參與；全部缺少時不更新。空單用 min 鏡像。 */
+/** 移動停損（多）：max(舊停損, 5m 趨勢線支撐 − 1 tick, 入場後最高價 − trailAtr × 5m ATR)。
+ *  趨勢線只在它是翻轉價位的演算法（SuperTrend、Donchian＋ATR）參與；缺少的來源不參與，
+ *  全部缺少時不更新。空單用 min 鏡像。 */
 export function trailStop(
     dir: Direction,
     current: number,

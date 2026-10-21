@@ -5,8 +5,9 @@ import type { ParamDef } from '../indicator-defs';
 import type { EntryMode, EntryParams, NoteParams, RiskConfig, TrendAlgoId, TrendParams, TrendSignalConfig } from './types';
 
 export const TSP_TYPE = 'trend-signal-pro';
-/** 計算規則版本：改動任何訊號／進場／風控規則都要升版，舊 ID 才不會混淆 */
-export const TSP_ALGO_VERSION = 'tsp-1.0.0';
+/** 計算規則版本：改動任何訊號／進場／風控規則都要升版，舊 ID 才不會混淆。
+ *  1.1.0：TrendCore 四態（含 NEUTRAL）與 Donchian＋ATR、整段趨勢的多次 1m 提示（V1.1） */
+export const TSP_ALGO_VERSION = 'tsp-1.1.0';
 
 /** V1 交易權限：只觀察。啟用任何發單能力需另行授權（規格 §0.5） */
 export const TSP_PERMISSIONS = {
@@ -23,15 +24,19 @@ export const TSP_PARAMS: ParamDef[] = [
     { key: 'algo', label: '趨勢｜演算法（0 SuperTrend／1 Donchian／2 KAMA）', def: 0, min: 0, max: 2 },
     { key: 'stPeriod', label: '趨勢｜SuperTrend ATR 週期', def: 10, min: 1, max: 100 },
     { key: 'stMult', label: '趨勢｜SuperTrend 倍數（靈敏度，小＝快）', def: 3, min: 0.5, max: 10, step: 0.5 },
-    { key: 'dcLength', label: '趨勢｜Donchian 週期', def: 20, min: 2, max: 200 },
+    { key: 'dcLength', label: '趨勢｜Donchian 突破週期', def: 20, min: 2, max: 200 },
+    { key: 'dcAtrMult', label: '趨勢｜Donchian ATR 追蹤帶倍數（觸及＝趨勢失效）', def: 3, min: 0.5, max: 10, step: 0.5 },
     { key: 'kamaLength', label: '趨勢｜KAMA 效率比週期', def: 10, min: 2, max: 100 },
     { key: 'kamaFast', label: '趨勢｜KAMA 快速常數', def: 2, min: 1, max: 50 },
     { key: 'kamaSlow', label: '趨勢｜KAMA 慢速常數', def: 30, min: 2, max: 200 },
     { key: 'kamaHyst', label: '趨勢｜KAMA 翻轉遲滯（× ATR14）', def: 0.3, min: 0, max: 3, step: 0.05 },
     { key: 'emaPeriod', label: '註記｜EMA 週期（只標示，不影響訊號）', def: 21, min: 2, max: 200 },
-    { key: 'entryMode', label: '進場｜風控採用（0 IMMEDIATE／1 MICRO_TREND／2 PRICE_STRUCTURE／3 舊假說 EMA9·VWAP·KD）', def: 0, min: 0, max: 3 },
-    { key: 'windowBars', label: '進場｜窗口（5m 根數，不跨盤）', def: 3, min: 1, max: 20 },
-    { key: 'microMult', label: '進場｜1m 微型趨勢 SuperTrend 倍數（小＝快）', def: 1, min: 0.25, max: 10, step: 0.25 },
+    { key: 'entryMode', label: '進場｜風控採用（0 IMMEDIATE／1 MICRO_TREND／2 PRICE_STRUCTURE／3 先前策略假說・未驗證 EMA9·VWAP·KD）', def: 0, min: 0, max: 3 },
+    // V1.1 語義改變的參數換了鍵名：V1.0 已存實例的 windowBars=3（15 分鐘窗口）、microMult=1 不沿用
+    { key: 'hintWindow', label: '進場｜提示範圍（0 整段 5m 趨勢／N 翻轉後 N 根 5m）', def: 0, min: 0, max: 20 },
+    { key: 'microStMult', label: '進場｜1m 微型趨勢 SuperTrend 倍數', def: 3, min: 0.25, max: 10, step: 0.25 },
+    { key: 'microDcLength', label: '進場｜1m 微型趨勢 Donchian 週期', def: 20, min: 2, max: 200 },
+    { key: 'microKamaHyst', label: '進場｜1m 微型趨勢 KAMA 遲滯（× ATR14）', def: 0.3, min: 0, max: 3, step: 0.05 },
     { key: 'pivotLeft', label: '進場｜結構轉折左側 K 棒', def: 2, min: 1, max: 10 },
     { key: 'pivotRight', label: '進場｜結構轉折右側確認 K 棒', def: 2, min: 1, max: 10 },
     { key: 'minPullbackAtr', label: '進場｜最小回檔（× 1m ATR14）', def: 0.5, min: 0, max: 5, step: 0.05 },
@@ -68,6 +73,7 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
         stPeriod: int(p, 'stPeriod'),
         stMult: param(p, 'stMult'),
         dcLength: int(p, 'dcLength'),
+        dcAtrMult: param(p, 'dcAtrMult'),
         kamaLength: int(p, 'kamaLength'),
         kamaFast: int(p, 'kamaFast'),
         kamaSlow: int(p, 'kamaSlow'),
@@ -76,8 +82,10 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
     const note: NoteParams = { emaPeriod: int(p, 'emaPeriod'), emaSlopeBars: 2, atrPeriod: 14, rsiPeriod: 14, keyBars: 20 };
     const entry: EntryParams = {
         mode: ENTRY_MODES[int(p, 'entryMode')] ?? 'IMMEDIATE',
-        windowBars: int(p, 'windowBars'),
-        microMult: param(p, 'microMult'),
+        windowBars: int(p, 'hintWindow'),
+        microMult: param(p, 'microStMult'),
+        microDcLength: int(p, 'microDcLength'),
+        microKamaHyst: param(p, 'microKamaHyst'),
         pivotLeft: int(p, 'pivotLeft'),
         pivotRight: int(p, 'pivotRight'),
         minPullbackAtr: param(p, 'minPullbackAtr'),
@@ -100,6 +108,12 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
 }
 
 export const DEFAULT_CONFIG: TrendSignalConfig = configFromParams(DEFAULTS);
+
+/** 1m 微型趨勢：與 5m 同一個 TrendCore 演算法，只換各演算法的靈敏度參數（V1.1 §4）；
+ *  其餘參數（ATR 週期、KAMA 週期、Donchian 追蹤帶倍數）沿用趨勢設定 */
+export function microParams(cfg: TrendSignalConfig): TrendParams {
+    return { ...cfg.trend, stMult: cfg.entry.microMult, dcLength: cfg.entry.microDcLength, kamaHyst: cfg.entry.microKamaHyst };
+}
 
 // FNV-1a 32-bit — 參數指紋只求穩定、短，不做安全用途
 function fnv1a(s: string): string {

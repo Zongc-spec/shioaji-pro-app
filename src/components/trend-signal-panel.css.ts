@@ -71,10 +71,13 @@ export const primary = style({ fontSize: '0.72rem', fontWeight: 700 });
 export const sub = style({ color: vars.color.mutedForeground, gridColumn: '2 / 4' });
 
 export const dir = styleVariants({
-    UP: { color: '#1fd286', fontWeight: 700 },
-    DOWN: { color: '#ff4d6a', fontWeight: 700 },
+    LONG: { color: '#1fd286', fontWeight: 700 },
+    SHORT: { color: '#ff4d6a', fontWeight: 700 },
+    NEUTRAL: { color: vars.color.amber, fontWeight: 700 },
     UNKNOWN: { color: vars.color.mutedForeground },
 });
+
+export const stale = style({ color: vars.color.amber, fontFamily: vars.font.body });
 
 export const tag = styleVariants({
     ALIGN: { color: '#1fd286' },
@@ -102,12 +105,13 @@ export const riskChip = style([
 export const warn = style({ color: vars.color.amber, fontFamily: vars.font.body });
 export const note = style({ color: vars.color.mutedForeground, fontFamily: vars.font.body, fontSize: '0.58rem' });
 
-export const entryStatus = styleVariants({
-    TRIGGERED: { color: '#1fd286' },
-    PENDING: { color: vars.color.foreground },
-    EXPIRED: { color: vars.color.mutedForeground },
-    CANCELLED: { color: vars.color.mutedForeground },
+/** 1m 提示：段落仍可提示／已停止 */
+export const hint = styleVariants({
+    active: { color: '#19b6c9' },
+    closed: { color: vars.color.mutedForeground },
 });
+
+export const entryList = style({ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', gap: '1px' });
 
 export const chip = style([
     card,

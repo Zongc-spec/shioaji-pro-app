@@ -1,13 +1,14 @@
-// src/lib/trend-signal/trigger/pullback-kd.ts — 舊策略假說（規格 §1.2）的 1m 進場
-// 確認：最近兩根已收 1m 曾回測 EMA9 或當盤 VWAP（容差 × 1m ATR），最新一根
-// 收盤站回 EMA9，且 KD 在最新一根交叉。只作為可選的比較模式；參數固定為
-// 規格預設，不開放設定、不再擴充。
+// src/lib/trend-signal/trigger/pullback-kd.ts — 先前策略假說／未驗證（舊規格 §1.2）的 1m
+// 進場確認：最近兩根已收 1m 曾回測 EMA9 或當盤 VWAP（容差 × 1m ATR），最新一根
+// 收盤站回 EMA9，且 KD 在最新一根交叉。V1.1 §4.3：只能是第三套可選 plugin，預設 OFF
+// （只有風控採用它時才計算）；參數固定為舊規格預設，不開放設定、不再擴充。
 
 import { atr, ema, stoch } from '../../indicators';
 import type { Candle } from '../../types/market';
 import { alignPoints } from '../core/bars';
-import type { Direction, EntryEvent, TrendSignal } from '../types';
-import { entryEvent, windowIndexes, type SignalWindow } from './window';
+import type { Direction, EntryEvent } from '../types';
+import type { ModeResult } from './modes';
+import { hintEvent, type TrendSegment } from './window';
 
 export const PULLBACK_KD = {
     ema: 9,
@@ -115,24 +116,14 @@ export function evalSetup(bars: Candle[], ind: KdIndicators, m: number, dir: Dir
     return { stage, touched, chase, volumeOk };
 }
 
-export function pullbackKdEntry(
-    id: string,
-    sig: TrendSignal,
-    w: SignalWindow,
-    m1: Candle[],
-    ind: KdIndicators,
-    asOf: number,
-): EntryEvent {
-    for (const m of windowIndexes(m1, w)) {
-        const ev = evalSetup(m1, ind, m, sig.direction);
-        if (ev.stage === 'READY' && !ev.chase && ev.volumeOk) {
-            const bar = m1[m]!;
-            return entryEvent(id, 'PULLBACK_KD', sig, w, {
-                barTime: bar.time,
-                refPrice: bar.close,
-                reason: `回測 ${ev.touched === 'BOTH' ? 'EMA9＋VWAP' : ev.touched === 'EMA' ? 'EMA9' : 'VWAP'} 後站回且 KD 交叉（舊假說）`,
-            }, asOf);
-        }
+export function pullbackKdHints(seg: TrendSegment, m1: Candle[], ind: KdIndicators, key: string): ModeResult {
+    const hints: EntryEvent[] = [];
+    for (const m of seg.bars) {
+        const ev = evalSetup(m1, ind, m, seg.signal.direction);
+        if (ev.stage !== 'READY' || ev.chase || !ev.volumeOk) continue;
+        const bar = m1[m]!;
+        hints.push(hintEvent(seg, 'PULLBACK_KD', key, hints.length + 1, bar.time, bar.close,
+            `回測 ${ev.touched === 'BOTH' ? 'EMA9＋VWAP' : ev.touched === 'EMA' ? 'EMA9' : 'VWAP'} 後站回且 KD 交叉（先前策略假說／未驗證）`));
     }
-    return entryEvent(id, 'PULLBACK_KD', sig, w, null, asOf, '等待回測 EMA9／VWAP 並 KD 交叉（舊假說）');
+    return { hints, waiting: '等待回測 EMA9／VWAP 並 KD 交叉（先前策略假說／未驗證）' };
 }

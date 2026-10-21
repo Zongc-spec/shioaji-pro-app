@@ -1,26 +1,27 @@
 // src/components/trend-signal-panel.tsx — Trend Signal Pro 的圖上面板：右上四週期
-// Dashboard（5m 主控、1m 微型、15m 輔助、60m 背景與進場時機）、右下虛擬風控（R 面板）、
-// 審計視窗與模式切換。只顯示、不送任何委託；「模擬警示」只發 App 通知（onAlert 由
-// candle-chart 注入，本元件不 import 任何交易模組）。
+// Dashboard（5m 主控、1m 微型、15m 輔助、60m 背景與各模式的 1m 提示）、右下虛擬風控
+// （R 面板）、審計視窗與模式切換。只顯示、不送任何委託；「模擬警示」只發 App 通知
+// （onAlert 由 candle-chart 注入，本元件不 import 任何交易模組）。
 
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useEscClose } from '../hooks/use-esc-close';
 import type { TrendSignalFeed } from '../hooks/use-trend-signal';
 import { maskMoney, usePrivacyMode } from '../lib/privacy';
-import { TSP_PERMISSIONS } from '../lib/trend-signal/config';
+import { TSP_ALGO_VERSION, TSP_PERMISSIONS } from '../lib/trend-signal/config';
 import { wallHm, wallTime } from '../lib/trend-signal/core/session';
+import { futuresTax } from '../lib/trend-signal/risk/plan';
 import { exitText } from '../lib/trend-signal/risk/virtual';
 import type {
     Alignment,
     AuditEvent,
-    EntryEvent,
     EntryMode,
-    EntryStatus,
+    EntryModeState,
     TfSnapshot,
-    TrendDir,
+    TrendParams,
     TrendSignalConfig,
     TrendSignalResult,
+    TrendState,
 } from '../lib/trend-signal/types';
 import type { ContractBase } from '../lib/types/contract';
 import { formatToTick } from '../lib/utils/ticksize';
@@ -77,10 +78,11 @@ export interface TspAlert {
     body: string;
 }
 const ALERTED_KEY = 'sj-pro-tsp-alerted-v1';
-const ALERT_KINDS: AuditEvent['kind'][] = ['SIGNAL', 'ENTRY', 'FILL', 'EXIT'];
+const ALERT_KINDS: AuditEvent['kind'][] = ['SIGNAL', 'INVALID', 'ENTRY', 'FILL', 'EXIT'];
 const ALERT_TITLE: Partial<Record<AuditEvent['kind'], string>> = {
     SIGNAL: '5m 趨勢切換',
-    ENTRY: '1m 進場時機',
+    INVALID: '5m 趨勢失效',
+    ENTRY: '1m 進場提示',
     FILL: '虛擬成交',
     EXIT: '虛擬出場',
 };
@@ -127,20 +129,28 @@ export function useTspAlerts(feed: TrendSignalFeed, mode: TspMode, onAlert: (a: 
 
 // ---- 顯示用文字 ----
 
-const DIR_TEXT: Record<TrendDir, string> = { UP: '▲ 多', DOWN: '▼ 空', UNKNOWN: '— 未知' };
+const DIR_TEXT: Record<TrendState, string> = { LONG: '▲ 多', SHORT: '▼ 空', NEUTRAL: '■ 中性（無趨勢）', UNKNOWN: '— 未知' };
 const ALIGN_TEXT: Record<Alignment, string> = { ALIGN: '同向', DIVERGE: '逆向', NEUTRAL: '中性' };
 const MODE_TEXT: Record<EntryMode, string> = {
     IMMEDIATE: '立即',
     MICRO_TREND: '微型趨勢',
     PRICE_STRUCTURE: '價格結構',
-    PULLBACK_KD: '舊假說 KD',
+    PULLBACK_KD: '先前策略假說／未驗證',
 };
-const STATUS_TEXT: Record<EntryStatus, string> = { TRIGGERED: '已觸發', PENDING: '等待', EXPIRED: '逾期', CANCELLED: '取消' };
 const EMA_TEXT = { WITH: 'EMA 同向', AGAINST: 'EMA 逆向', MIXED: 'EMA 不一致', UNKNOWN: 'EMA —' } as const;
-const ALGO_TEXT = { supertrend: 'SuperTrend', donchian: 'Donchian', kama: 'KAMA' } as const;
+const ALGO_TEXT = { supertrend: 'SuperTrend', donchian: 'Donchian＋ATR', kama: 'KAMA' } as const;
 
 const num = (v: number | undefined, d = 2) => (v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
 const hm = (t: number | null | undefined) => (t === null || t === undefined ? '—' : wallHm(t));
+
+/** 目前演算法的計算參數（面板標題的說明） */
+export function algoParams(p: TrendParams): string {
+    switch (p.algo) {
+        case 'supertrend': return `SuperTrend ATR ${p.stPeriod} × ${p.stMult}`;
+        case 'donchian': return `Donchian ${p.dcLength} 根突破＋ATR14 × ${p.dcAtrMult} 追蹤帶`;
+        case 'kama': return `KAMA ${p.kamaLength},${p.kamaFast},${p.kamaSlow}＋遲滯 ${p.kamaHyst} × ATR14`;
+    }
+}
 
 export function feedBadge(feed: TrendSignalFeed): { cls: keyof typeof s.badge; text: string } {
     const res = feed.result;
@@ -163,9 +173,22 @@ function TfRow({ label, snap, px, showAlign }: { label: string; snap: TfSnapshot
                 {snap.age !== null && <span>{snap.age} 根</span>}
                 {showAlign && <span className={s.tag[snap.align]}>{ALIGN_TEXT[snap.align]}</span>}
                 {showAlign && <span>H {px(snap.keyHigh)} L {px(snap.keyLow)}</span>}
+                {snap.stale && <span className={s.stale} title='最後一根不是前一個週期桶（換盤後尚未收第一根、或資料缺洞）'>過期</span>}
             </span>
-            <span className={s.rowTime}>{hm(snap.barTime)}</span>
+            <span className={s.rowTime} title='最後一根已收 K 棒的收盤時間'>{hm(snap.barTime)}</span>
         </div>
+    );
+}
+
+function EntryRow({ mode, st, selected, px }: { mode: EntryMode; st: EntryModeState | undefined; selected: boolean; px: (v: number | undefined) => string }) {
+    const last = st?.last ?? null;
+    return (
+        <span title={st ? `${st.waiting}${last ? `\n最近：${last.reason}` : ''}` : '尚無 5m 訊號'}>
+            {selected ? '★' : ''}{MODE_TEXT[mode]}{' '}
+            <span className={st?.active ? s.hint.active : s.hint.closed}>
+                {st ? `${st.hints} 次${last ? ` · 最近 ${hm(last.barTime)} @ ${px(last.refPrice)}` : ''}${st.active ? '' : ' · 停止'}` : '—'}
+            </span>
+        </span>
     );
 }
 
@@ -201,7 +224,7 @@ export function TrendSignalPanel({
             <button className={s.chip} style={{ right }} onClick={() => onPrefs({ collapsed: false })} title='展開 Trend Signal Pro'>
                 <span>TSP</span>
                 {snap && <span className={s.dir[snap.m5.dir]}>{DIR_TEXT[snap.m5.dir]}</span>}
-                {signal && <span>{signal.kind} {hm(signal.barTime)}</span>}
+                {signal && <span>5m {signal.kind} {hm(signal.barTime)}</span>}
                 <span className={s.badge[badge.cls]}>{badge.text}</span>
             </button>
         );
@@ -214,14 +237,20 @@ export function TrendSignalPanel({
     const sign = open?.direction === 'LONG' ? 1 : -1;
     const pv = open?.plan.pointValue ?? 0;
     const unrealPts = open && lastPrice !== null ? sign * (lastPrice - open.fillPrice) * open.openQty : null;
-    const unrealNtd = unrealPts !== null && open ? unrealPts * pv - 2 * config.risk.feePerSide * open.openQty : null;
+    // 未實現：扣兩邊手續費與期交稅（滑價已反映在成交價；出場滑價未計）
+    const unrealNtd = unrealPts !== null && open && res
+        ? unrealPts * pv - (2 * config.risk.feePerSide + futuresTax(open.fillPrice, pv, res.taxRate) + futuresTax(lastPrice ?? open.fillPrice, pv, res.taxRate)) * open.openQty
+        : null;
     const pending = snap?.pendingEntry ?? null;
+    const hintRange = config.entry.windowBars > 0 ? `翻轉後 ${config.entry.windowBars} 根 5m` : '整段 5m 趨勢';
 
     return (
         <>
             <div className={s.dashboard} style={{ right }}>
                 <div className={s.header}>
-                    <span className={s.headerTitle} title='Trend Signal Pro'>TSP · {ALGO_TEXT[config.trend.algo]}</span>
+                    <span className={s.headerTitle} title={`Trend Signal Pro ${TSP_ALGO_VERSION} · ${algoParams(config.trend)}`}>
+                        TSP · {ALGO_TEXT[config.trend.algo]}
+                    </span>
                     <select
                         className={s.select}
                         value={prefs.mode}
@@ -242,6 +271,7 @@ export function TrendSignalPanel({
                         <span className={s.badge[badge.cls]}>{badge.text}</span>
                         <span className={s.note}> · 只觀察，不送任何委託</span>
                     </div>
+                    <div className={s.note}>{algoParams(config.trend)} · {TSP_ALGO_VERSION}</div>
                     {snap && (
                         <>
                             <div className={s.row}>
@@ -252,31 +282,25 @@ export function TrendSignalPanel({
                                     <span title='(收盤 − 趨勢線) ÷ ATR'>距線 {num(snap.m5.distAtr)} ATR</span>
                                     <span>ATR {num(snap.m5.atr, 1)}</span>
                                     <span>RSI {num(snap.m5.rsi, 0)}</span>
+                                    {snap.m5.stale && <span className={s.stale} title='換盤後尚未收第一根 5m、或資料缺洞：1m 不提示'>過期</span>}
                                 </span>
-                                <span className={s.rowTime}>{hm(snap.m5.barTime)}</span>
+                                <span className={s.rowTime} title='最後一根已收 5m 的收盤時間'>{hm(snap.m5.barTime)}</span>
                                 {signal && (
                                     <span className={s.sub}>
-                                        最新 {signal.kind} {hm(signal.barTime)} @ {px(signal.close)} · {EMA_TEXT[signal.notes.ema]} · 15m {ALIGN_TEXT[signal.notes.m15Align]} · 60m {ALIGN_TEXT[signal.notes.m60Align]}
+                                        最新 5m {signal.kind} {hm(signal.barTime)} @ {px(signal.close)} · {EMA_TEXT[signal.notes.ema]} · 15m {ALIGN_TEXT[signal.notes.m15Align]}{signal.notes.m15Stale ? '（過期）' : ''} · 60m {ALIGN_TEXT[signal.notes.m60Align]}{signal.notes.m60Stale ? '（過期）' : ''}
                                     </span>
+                                )}
+                                {snap.invalid && (
+                                    <span className={s.sub}>{snap.invalid.from === 'LONG' ? '多' : '空'}方趨勢失效 {hm(snap.invalid.barTime)}（不是反向訊號；再次突破才有 BUY／SELL）</span>
                                 )}
                             </div>
                             <TfRow label='1m 微型' snap={snap.m1} px={px} showAlign={false} />
                             <div className={s.row}>
-                                <span className={s.rowLabel}>進場時機</span>
-                                <span className={s.rowMain}>
-                                    {modes.map((m) => {
-                                        const e: EntryEvent | undefined = snap.entries[m];
-                                        return (
-                                            <span key={m} title={e?.reason ?? '尚無 5m 訊號'}>
-                                                {m === config.entry.mode ? '★' : ''}{MODE_TEXT[m]}{' '}
-                                                <span className={e ? s.entryStatus[e.status] : undefined}>
-                                                    {e ? `${STATUS_TEXT[e.status]}${e.barTime !== null ? ` ${hm(e.barTime)}` : ''}` : '—'}
-                                                </span>
-                                            </span>
-                                        );
-                                    })}
+                                <span className={s.rowLabel}>1m 提示</span>
+                                <span className={s.entryList}>
+                                    {modes.map((m) => <EntryRow key={m} mode={m} st={snap.entries[m]} selected={m === config.entry.mode} px={px} />)}
+                                    <span className={s.note}>範圍：{hintRange}；5m 反向、失效或過期即停止</span>
                                 </span>
-                                <span />
                             </div>
                             <TfRow label='15m 輔助' snap={snap.m15} px={px} showAlign />
                             <TfRow label='60m 背景' snap={snap.m60} px={px} showAlign />
@@ -284,7 +308,7 @@ export function TrendSignalPanel({
                             {snap.m1Against && <div className={s.warn}>⚠ 1m 微型趨勢與虛擬部位反向（只警告，不出場）</div>}
                         </>
                     )}
-                    <div className={s.note}>★ 為虛擬風控採用的進場時機。自行設計的公開演算法，非 Universal Indicator／Ultimate AI 原版。</div>
+                    <div className={s.note}>5m BUY／SELL＝主趨勢切換；1m ENTRY＝5m 方向內的執行候選（不是委託）。★ 為虛擬風控採用的模式。自行設計的公開演算法，非 Universal Indicator／Ultimate AI 原版，未驗證優於原版。</div>
                 </div>
             </div>
             {res && prefs.riskCollapsed && (
@@ -303,33 +327,37 @@ export function TrendSignalPanel({
                         {res.snapshot.trade === null && !pending && <div className={s.note}>目前無虛擬部位</div>}
                         {pending && (
                             <div>
-                                {MODE_TEXT[pending.entry.mode]}已觸發 {hm(pending.entry.barTime)}：待下一根 1m 開盤虛擬成交 · 參考 {px(pending.plan.entry)} · 停損 {px(pending.plan.stop)} · R {pending.plan.riskPoints} 點／{money(pending.plan.totalRisk)} · {pending.plan.qty} 口
+                                {MODE_TEXT[pending.entry.mode]}第 {pending.entry.seq} 次提示 {hm(pending.entry.barTime)}：待下一根 1m 開盤虛擬成交 · 參考 {px(pending.plan.entry)} · 停損 {px(pending.plan.stop)} · R {pending.plan.riskPoints} 點／{money(pending.plan.totalRisk)} · {pending.plan.qty} 口
                             </div>
                         )}
                         {trade && trade.status === 'CLOSED' && !pending && (
                             <>
                                 <div>
-                                    上一筆（已出場）：<span className={s.dir[trade.direction === 'LONG' ? 'UP' : 'DOWN']}>{trade.direction === 'LONG' ? '多' : '空'}</span>{' '}
-                                    {trade.qty} 口 @ {px(trade.fillPrice)}（{hm(trade.fillTime - 60)} 成交，{MODE_TEXT[trade.entryMode]}觸發 {hm(trade.signalTime)}）
+                                    上一筆（已出場）：<span className={s.dir[trade.direction]}>{trade.direction === 'LONG' ? '多' : '空'}</span>{' '}
+                                    {trade.qty} 口 @ {px(trade.fillPrice)}（{hm(trade.fillTime - 60)} 成交，{MODE_TEXT[trade.entryMode]}提示 {hm(trade.signalTime)}）
                                 </div>
                                 <div>出場：{trade.fills.map((f) => `${exitText(f.reason)} ${f.qty} 口 @ ${px(f.price)}（${hm(f.time)}）`).join('；')}</div>
-                                <div>初始停損 {px(trade.plan.stop)} · R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)} · 已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點／{money(trade.realizedNtd)}（虛擬，扣手續費）</div>
+                                <div>初始停損 {px(trade.plan.stop)} · R {trade.plan.riskPoints} 點／{money(trade.plan.riskPerLot * trade.qty)} · 已實現 {trade.realizedPoints >= 0 ? '+' : ''}{trade.realizedPoints} 點／{money(trade.realizedNtd)}（虛擬，扣手續費與期交稅）</div>
                             </>
                         )}
                         {open && (
                             <>
                                 <div>
-                                    <span className={s.dir[open.direction === 'LONG' ? 'UP' : 'DOWN']}>{open.direction === 'LONG' ? '多' : '空'}</span>{' '}
-                                    {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{hm(open.fillTime - 60)} 成交，{MODE_TEXT[open.entryMode]}觸發 {hm(open.signalTime)}）
+                                    <span className={s.dir[open.direction]}>{open.direction === 'LONG' ? '多' : '空'}</span>{' '}
+                                    {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{hm(open.fillTime - 60)} 成交，{MODE_TEXT[open.entryMode]}提示 {hm(open.signalTime)}）
                                 </div>
                                 <div>初始停損 {px(open.plan.stop)}（{open.plan.stopBasis === 'swing' ? '擺動點' : open.plan.stopBasis === 'atr' ? '1m ATR' : 'ATR 備援'}）· R {open.plan.riskPoints} 點／{money(open.plan.riskPerLot * open.qty)}</div>
                                 <div>1R {px(open.plan.r1)} · 2R {px(open.plan.r2)} · 3R {px(open.plan.r3)} · 保本 {px(open.plan.breakevenStop)}</div>
                                 <div>目前停損 {px(open.stop)}（{open.stopKind === 'initial' ? '初始' : open.stopKind === 'breakeven' ? '保本' : '移動'}）{open.trailing ? ' · 移動停損啟動' : ''}</div>
                                 <div>
                                     {unrealPts !== null && unrealNtd !== null && <>未實現 {unrealPts >= 0 ? '+' : ''}{unrealPts} 點／{money(unrealNtd)} · </>}
-                                    已實現 {open.realizedPoints >= 0 ? '+' : ''}{open.realizedPoints} 點／{money(open.realizedNtd)}（虛擬，扣手續費）
+                                    已實現 {open.realizedPoints >= 0 ? '+' : ''}{open.realizedPoints} 點／{money(open.realizedNtd)}（虛擬，扣手續費與期交稅）
                                 </div>
-                                {snap?.pendingExit && <div className={s.warn}>5m 已確認反向：下一根 1m 開盤平倉（不等 1m）</div>}
+                                {snap?.pendingExit && (
+                                    <div className={s.warn}>
+                                        {snap.pendingExit.reason === 'REVERSAL' ? '5m 已確認反向' : '5m 趨勢已失效'}：下一根 1m 開盤平倉（不等 1m）
+                                    </div>
+                                )}
                                 {open.warnings.map((w) => <div key={w} className={s.warn}>⚠ {w}</div>)}
                             </>
                         )}
@@ -337,7 +365,7 @@ export function TrendSignalPanel({
                     </div>
                 </div>
             )}
-            {audit && res && <AuditDialog res={res} onClose={() => setAudit(false)} />}
+            {audit && res && <AuditDialog res={res} config={config} onClose={() => setAudit(false)} />}
         </>
     );
 }
@@ -346,27 +374,34 @@ export function TrendSignalPanel({
 
 type AuditTab = 'events' | 'signals' | 'entries' | 'trades';
 
-export function auditExport(res: TrendSignalResult) {
+export function auditExport(res: TrendSignalResult, config?: TrendSignalConfig) {
     return {
         version: res.version,
         configKey: res.configKey,
+        ...(config ? { algorithm: algoParams(config.trend), config } : {}),
         symbol: res.symbol,
         contractMonth: res.contractMonth,
         asOf: wallTime(res.asOf),
         permissions: TSP_PERMISSIONS,
         dataSource: 'shioaji kbars 1m（20 個日曆日）＋ SSE 逐筆成交；只用已收 K 棒',
         signals: res.signals,
+        invalidations: res.invalidations,
         entries: res.entries,
         trades: res.trades,
         events: res.events.map((e) => ({ ...e, at: wallTime(e.time) })),
     };
 }
 
-function AuditDialog({ res, onClose }: { res: TrendSignalResult; onClose: () => void }) {
+function AuditDialog({ res, config, onClose }: { res: TrendSignalResult; config: TrendSignalConfig; onClose: () => void }) {
     const [tab, setTab] = useState<AuditTab>('events');
     const [copied, setCopied] = useState('');
     useEscClose(onClose);
-    const json = () => JSON.stringify(auditExport(res), null, 2);
+    const json = () => JSON.stringify(auditExport(res, config), null, 2);
+    // 5m 切換與失效依時間合併成同一張表
+    const fiveMin = [
+        ...res.signals.map((g) => ({ id: g.id, time: g.barTime, kind: g.kind as string, signal: g })),
+        ...res.invalidations.map((x) => ({ id: x.id, time: x.barTime, kind: `${x.from === 'LONG' ? '多' : '空'}方失效`, signal: null })),
+    ].sort((a, b) => b.time - a.time);
     const copy = () => {
         void navigator.clipboard?.writeText(json()).then(() => setCopied('已複製'), () => setCopied('無法存取剪貼簿'));
     };
@@ -378,7 +413,12 @@ function AuditDialog({ res, onClose }: { res: TrendSignalResult; onClose: () => 
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     };
-    const tabs: [AuditTab, string][] = [['events', `事件 ${res.events.length}`], ['signals', `5m 訊號 ${res.signals.length}`], ['entries', `進場時機 ${res.entries.length}`], ['trades', `虛擬部位 ${res.trades.length}`]];
+    const tabs: [AuditTab, string][] = [
+        ['events', `事件 ${res.events.length}`],
+        ['signals', `5m 訊號 ${res.signals.length}／失效 ${res.invalidations.length}`],
+        ['entries', `1m 提示 ${res.entries.length}`],
+        ['trades', `虛擬部位 ${res.trades.length}`],
+    ];
     return createPortal(
         <div className={s.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
             <div className={s.dialog}>
@@ -405,12 +445,12 @@ function AuditDialog({ res, onClose }: { res: TrendSignalResult; onClose: () => 
                         )}
                         {tab === 'signals' && (
                             <>
-                                <thead><tr><th>5m 收棒</th><th>訊號</th><th>收盤</th><th>趨勢線</th><th>EMA 註記</th><th>15m／60m（收棒）</th><th>ID</th></tr></thead>
+                                <thead><tr><th>5m 收棒</th><th>事件</th><th>收盤</th><th>趨勢線</th><th>EMA 註記</th><th>15m／60m（收棒）</th><th>ID</th></tr></thead>
                                 <tbody>
-                                    {[...res.signals].reverse().map((g) => (
-                                        <tr key={g.id}>
-                                            <td>{wallTime(g.barTime)}</td><td>{g.kind}</td><td>{g.close}</td><td>{num(g.line, 1)}</td><td>{g.notes.ema}</td>
-                                            <td>{g.notes.m15}（{hm(g.notes.m15BarTime)}）／{g.notes.m60}（{hm(g.notes.m60BarTime)}）</td><td>{g.id}</td>
+                                    {fiveMin.map(({ id, time, kind, signal: g }) => (
+                                        <tr key={id}>
+                                            <td>{wallTime(time)}</td><td>{kind}</td><td>{g ? g.close : '—'}</td><td>{g ? num(g.line, 1) : '—'}</td><td>{g ? g.notes.ema : '—'}</td>
+                                            <td>{g ? `${g.notes.m15}（${hm(g.notes.m15BarTime)}${g.notes.m15Stale ? ' 過期' : ''}）／${g.notes.m60}（${hm(g.notes.m60BarTime)}${g.notes.m60Stale ? ' 過期' : ''}）` : '—'}</td><td>{id}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -418,12 +458,12 @@ function AuditDialog({ res, onClose }: { res: TrendSignalResult; onClose: () => 
                         )}
                         {tab === 'entries' && (
                             <>
-                                <thead><tr><th>訊號</th><th>模式</th><th>狀態</th><th>觸發</th><th>參考價</th><th>原因</th></tr></thead>
+                                <thead><tr><th>所屬 5m 訊號</th><th>模式</th><th>第幾次</th><th>1m 提示</th><th>參考價</th><th>原因</th></tr></thead>
                                 <tbody>
-                                    {[...res.entries].reverse().map((e) => (
+                                    {[...res.entries].sort((a, b) => b.barTime - a.barTime).map((e) => (
                                         <tr key={e.id}>
-                                            <td>{e.signalId.split('|').slice(-2).join(' ')}</td><td>{MODE_TEXT[e.mode]}</td><td>{STATUS_TEXT[e.status]}</td>
-                                            <td>{e.barTime !== null ? wallTime(e.barTime) : '—'}</td><td>{e.refPrice ?? '—'}</td><td>{e.reason}</td>
+                                            <td>{e.signalId.split('|').slice(-2).join(' ')}</td><td>{MODE_TEXT[e.mode]}</td><td>{e.seq}</td>
+                                            <td>{wallTime(e.barTime)}</td><td>{e.refPrice}</td><td>{e.reason}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -447,7 +487,7 @@ function AuditDialog({ res, onClose }: { res: TrendSignalResult; onClose: () => 
                     </table>
                 </div>
                 <div className={s.footer}>
-                    <span>計算版本 {res.configKey} · 截至 {wallTime(res.asOf)} · 只用已收 K 棒</span>
+                    <span>{algoParams(config.trend)} · 計算版本 {res.configKey} · 截至 {wallTime(res.asOf)} · 只用已收 K 棒</span>
                     <span className={s.spacer} />
                     {copied && <span>{copied}</span>}
                     <button className={s.btn} onClick={copy}>複製 JSON</button>

@@ -30,6 +30,11 @@ export function wallHm(t: number): string {
     return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
+/** 牆鐘秒 → 'YYYY-MM-DDTHH:MM'（事件 ID 用） */
+export function wallIso(t: number): string {
+    return wallTime(t).replace(' ', 'T');
+}
+
 /** 1m K 棒 label 所屬的交易時段。收盤後 CLOSE_GRACE 內的定盤 K 棒
  *  （例：期貨 13:46–13:49）歸剛收的那一盤，不歸下一盤。 */
 export function tradingSessionOf(secType: SecurityType, label: number): TradingSession {

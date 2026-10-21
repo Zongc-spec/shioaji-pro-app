@@ -1,41 +1,47 @@
-// src/lib/trend-signal/trigger/modes.ts — 三種獨立的 1m 進場時機（只決定時機，
-// 不改變 5m 訊號；空單皆完全鏡像）：
-//   IMMEDIATE        5m 收棒即觸發（比較基準）
-//   MICRO_TREND      1m 微型趨勢由反向轉回與 5m 同向
-//   PRICE_STRUCTURE  5m 訊號後形成並確認回檔轉折，之後收盤突破回檔起點
+// src/lib/trend-signal/trigger/modes.ts — EntryTiming 的獨立候選（只決定 5m 方向內的
+// 1m 時機，不改變 5m 狀態；空單皆完全鏡像）：
+//   IMMEDIATE        5m 收棒即提示，每段趨勢一次（比較基準）
+//   MICRO_TREND      1m 微型趨勢（與 5m 同一 TrendCore 家族）由反向／中性轉回同向，每次都提示
+//   PRICE_STRUCTURE  確認回檔轉折後收盤突破回檔起點；提示後要有新的回檔轉折才再提示
 // 轉折點以左右各 n 根判定，右側 n 根收盤後才算確認；不使用任何未來轉折。
 
 import type { Candle } from '../../types/market';
-import type { EntryEvent, EntryParams, TrendDir, TrendSignal } from '../types';
-import { entryEvent, windowIndexes, type SignalWindow } from './window';
+import type { EntryEvent, EntryParams, TrendState } from '../types';
+import { hintEvent, type TrendSegment } from './window';
 
-export function immediateEntry(id: string, sig: TrendSignal, w: SignalWindow, asOf: number): EntryEvent {
-    // 訊號落在該盤最後一根 5m：窗口為空，不跨盤進場
-    if (w.end <= sig.barTime) return entryEvent(id, 'IMMEDIATE', sig, w, null, asOf);
-    return entryEvent(id, 'IMMEDIATE', sig, w, { barTime: sig.barTime, refPrice: sig.close, reason: '5m 收棒立即' }, asOf);
+export interface ModeResult {
+    hints: EntryEvent[];
+    /** 段落仍有效時，目前在等什麼 */
+    waiting: string;
 }
 
-export function microTrendEntry(
-    id: string,
-    sig: TrendSignal,
-    w: SignalWindow,
-    m1: Candle[],
-    micro: TrendDir[],
-    asOf: number,
-): EntryEvent {
-    const want: TrendDir = sig.direction === 'LONG' ? 'UP' : 'DOWN';
-    const against: TrendDir = want === 'UP' ? 'DOWN' : 'UP';
-    for (const m of windowIndexes(m1, w)) {
-        if (micro[m - 1] === against && micro[m] === want) {
-            const bar = m1[m]!;
-            return entryEvent(id, 'MICRO_TREND', sig, w, {
-                barTime: bar.time,
-                refPrice: bar.close,
-                reason: `1m 微型趨勢由${against === 'DOWN' ? '空' : '多'}轉回${want === 'UP' ? '多' : '空'}`,
-            }, asOf);
-        }
+const STATE_WORD: Record<TrendState, string> = { LONG: '多', SHORT: '空', NEUTRAL: '中性', UNKNOWN: '未知' };
+
+export function immediateHints(seg: TrendSegment, key: string): ModeResult {
+    const sig = seg.signal;
+    // 訊號落在該盤最後一根 5m：下一根 1m 開盤已是下一盤，不提示
+    if (sig.barTime >= sig.sessionEnd) return { hints: [], waiting: '訊號在該盤最後一根 5m，不跨盤進場' };
+    return {
+        hints: [hintEvent(seg, 'IMMEDIATE', key, 1, sig.barTime, sig.close, '5m 收棒立即（比較基準）')],
+        waiting: '每段 5m 趨勢只提示一次',
+    };
+}
+
+export function microTrendHints(seg: TrendSegment, m1: Candle[], micro: TrendState[], key: string): ModeResult {
+    const want = seg.signal.direction;
+    const hints: EntryEvent[] = [];
+    for (const m of seg.bars) {
+        const prev = micro[m - 1];
+        if (micro[m] !== want || prev === undefined || prev === want || prev === 'UNKNOWN') continue;
+        const bar = m1[m]!;
+        hints.push(hintEvent(seg, 'MICRO_TREND', key, hints.length + 1, bar.time, bar.close, `1m 微型趨勢由${STATE_WORD[prev]}轉${STATE_WORD[want]}`));
     }
-    return entryEvent(id, 'MICRO_TREND', sig, w, null, asOf, '等待 1m 微型趨勢回檔後轉回同向');
+    const last = seg.bars[seg.bars.length - 1];
+    const cur = last !== undefined ? micro[last] : undefined;
+    const waiting = cur === undefined || cur === 'UNKNOWN'
+        ? '等待 1m 微型趨勢'
+        : cur === want ? '1m 已同向；等待回檔（反向或中性）後再轉回同向' : '1m 回檔中；等待轉回同向';
+    return { hints, waiting };
 }
 
 export interface Pivot {
@@ -90,42 +96,57 @@ function latestBefore(ps: Pivot[], m: number, before: number): Pivot | undefined
     return undefined;
 }
 
-export function priceStructureEntry(
-    id: string,
-    sig: TrendSignal,
-    w: SignalWindow,
+export function priceStructureHints(
+    seg: TrendSegment,
     m1: Candle[],
     atr1: (number | undefined)[],
     highs: Pivot[],
     lows: Pivot[],
     p: EntryParams,
-    asOf: number,
-): EntryEvent {
-    const long = sig.direction === 'LONG';
+    key: string,
+): ModeResult {
+    const long = seg.signal.direction === 'LONG';
     // 回檔轉折：多單為轉折低點、空單為轉折高點；起點為它之前最近的反向轉折
     const pull = long ? lows : highs;
     const start = long ? highs : lows;
+    const hints: EntryEvent[] = [];
+    // 回檔轉折必須形成在 5m 訊號（之後則是上一次提示）之後
+    let after = seg.signal.barTime;
     let waiting = '等待 5m 訊號後的回檔轉折確認';
-    for (const m of windowIndexes(m1, w)) {
-        // 最新已確認的回檔轉折，必須形成於 5m 訊號之後
+    // 目前回檔轉折是否已被收盤跌破（站上）：逐根累積，不重掃
+    let plIndex = -1;
+    let broken = false;
+    let scanned = -1;
+    let topKey = '';
+    let top = 0;
+    for (const m of seg.bars) {
         const k = lastConfirmed(pull, m);
         const pl = k >= 0 ? pull[k]! : undefined;
-        if (!pl || !(m1[pl.index]!.time > sig.barTime)) continue;
-        // 收盤跌破（站上）回檔轉折：結構失效，等下一個回檔轉折
-        let broken = false;
-        for (let k = pl.index + 1; k <= m && !broken; k++) {
-            broken = long ? m1[k]!.close < pl.price : m1[k]!.close > pl.price;
+        if (!pl || !(m1[pl.index]!.time > after)) {
+            waiting = hints.length > 0 ? '已提示；等待新的回檔轉折確認' : '等待 5m 訊號後的回檔轉折確認';
+            continue;
         }
+        if (pl.index !== plIndex) {
+            plIndex = pl.index;
+            broken = false;
+            scanned = pl.index;
+        }
+        for (let q = scanned + 1; q <= m && !broken; q++) broken = long ? m1[q]!.close < pl.price : m1[q]!.close > pl.price;
+        scanned = m;
         if (broken) {
-            waiting = '回檔轉折已被跌破（站上），等待新的回檔轉折';
+            waiting = `回檔轉折 ${pl.price} 已被收盤${long ? '跌破' : '站上'}，等待新的回檔轉折`;
             continue;
         }
         const ph = latestBefore(start, m, pl.index);
-        if (!ph) continue;
+        if (!ph) {
+            waiting = '等待回檔起點（反向轉折）確認';
+            continue;
+        }
         // 回檔起點取兩個轉折之間的極值（乾淨結構時就是 ph 本身）
-        let top = long ? -Infinity : Infinity;
-        for (let k = ph.index; k <= pl.index; k++) {
-            top = long ? Math.max(top, m1[k]!.high) : Math.min(top, m1[k]!.low);
+        if (topKey !== `${ph.index}:${pl.index}`) {
+            topKey = `${ph.index}:${pl.index}`;
+            top = long ? -Infinity : Infinity;
+            for (let q = ph.index; q <= pl.index; q++) top = long ? Math.max(top, m1[q]!.high) : Math.min(top, m1[q]!.low);
         }
         const depth = long ? top - pl.price : pl.price - top;
         const a = atr1[m];
@@ -136,12 +157,11 @@ export function priceStructureEntry(
         waiting = `回檔轉折 ${pl.price} 已確認，等待收盤${long ? '突破' : '跌破'} ${top}`;
         const c = m1[m]!.close;
         if (long ? c > top : c < top) {
-            return entryEvent(id, 'PRICE_STRUCTURE', sig, w, {
-                barTime: m1[m]!.time,
-                refPrice: c,
-                reason: `回檔轉折 ${pl.price} 確認後，收盤 ${c} ${long ? '突破' : '跌破'}回檔起點 ${top}`,
-            }, asOf);
+            hints.push(hintEvent(seg, 'PRICE_STRUCTURE', key, hints.length + 1, m1[m]!.time, c,
+                `回檔轉折 ${pl.price} 確認後，收盤 ${c} ${long ? '突破' : '跌破'}回檔起點 ${top}`));
+            after = m1[m]!.time;
+            waiting = '已提示；等待新的回檔轉折確認';
         }
     }
-    return entryEvent(id, 'PRICE_STRUCTURE', sig, w, null, asOf, waiting);
+    return { hints, waiting };
 }

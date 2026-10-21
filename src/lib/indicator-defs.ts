@@ -89,7 +89,7 @@ function tspLabel(p: Record<string, number>): string {
     const cfg = configFromParams(p);
     const t = cfg.trend;
     const algo = TSP_ALGO_LABEL[TREND_ALGOS.indexOf(t.algo)] ?? 'ST';
-    const args = t.algo === 'donchian' ? `${t.dcLength}` : t.algo === 'kama' ? `${t.kamaLength},${t.kamaFast},${t.kamaSlow}` : `${t.stPeriod}×${t.stMult}`;
+    const args = t.algo === 'donchian' ? `${t.dcLength}+ATR×${t.dcAtrMult}` : t.algo === 'kama' ? `${t.kamaLength},${t.kamaFast},${t.kamaSlow}` : `${t.stPeriod}×${t.stMult}`;
     return `TSP(${algo} ${args})`;
 }
 

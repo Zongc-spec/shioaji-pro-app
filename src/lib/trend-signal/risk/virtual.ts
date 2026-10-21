@@ -1,16 +1,17 @@
 // src/lib/trend-signal/risk/virtual.ts — 虛擬部位（只顯示、不送任何委託）。
-// 依設定的進場模式事件在下一根 1m 開盤虛擬成交；停損、保本、移動停損與分層
-// 停利；5m 反向切換在下一根 1m 開盤平倉（不等 1m）。只讀訊號、進場事件與
-// 已收 K 棒，不回寫任何訊號。
+// 依設定模式的 1m 提示在下一根 1m 開盤虛擬成交；停損、保本、移動停損與分層停利；
+// 5m 反向切換或趨勢失效在下一根 1m 開盤平倉（不等 1m）。同一段趨勢可多次提示：
+// 空手時才接受（停損出場後可再進場），持倉或待成交時略過、不加碼。只讀訊號、
+// 失效事件、進場提示與已收 K 棒，不回寫任何訊號。
 //
 // 時間序：逐根已收 1m（label t）
 //   1. label < t 尚未處理的已收 5m（那一根之前就已收盤）
-//   2. 啟用 barTime < t 的進場事件
-//   3. 這根的開盤：5m 反向平倉 → 待成交進場 → 下一根生效的停損
+//   2. 啟用 barTime < t 的提示
+//   3. 這根的開盤：5m 反向／失效平倉 → 待成交進場 → 下一根生效的停損
 //   4. 盤中：停損觸價（含跳空）— 保護性停損永遠獨立有效
 //   5. 已收 K 棒才判定：+1R 保本、+2R／+3R 停利與移動停損啟動
-//   6. label == t 的已收 5m：反向訊號排定平倉、更新移動停損
-//   7. 啟用 barTime == t 的進場事件
+//   6. label == t 的已收 5m：反向訊號或失效排定平倉、更新移動停損
+//   7. 啟用 barTime == t 的提示
 // 進行中的 1m 只做 2–4（開盤價與已發生的觸價不會再改變）。
 
 import { atr } from '../../indicators';
@@ -26,36 +27,43 @@ import type {
     RiskPlan,
     StopChange,
     TfSeries,
+    TrendInvalidation,
     TrendSignal,
     TrendTrack,
     VirtualTrade,
 } from '../types';
-import { planRisk, swingPoint, trailStop } from './plan';
+import { futuresTax, planRisk, swingPoint, trailStop } from './plan';
 
 export interface VirtualInput {
-    /** 已收 1m */
+    /** 已收 1m 與每根所屬交易時段的收盤 label */
     m1: Candle[];
+    m1SessionEnd: number[];
     live: Candle | null;
     asOf: number;
     m5: TfSeries;
     /** 5m 趨勢（移動停損讀它的線；唯讀） */
     t5: TrendTrack;
     signals: TrendSignal[];
-    /** 只放風控採用的那一種模式的事件 */
+    invalidations: TrendInvalidation[];
+    /** 只放風控採用的那一種模式的提示 */
     entries: EntryEvent[];
     cfg: RiskConfig;
     tick: number;
     pointValue: number | null;
+    /** 期交稅率（單邊）；0 = 不計 */
+    taxRate: number;
     /** 風控參數指紋（虛擬部位 ID 用） */
     key: string;
 }
+
+type TrendExit = { ref: string; reason: 'REVERSAL' | 'TREND_INVALID' };
 
 export interface VirtualOutput {
     trades: VirtualTrade[];
     events: AuditEvent[];
     open: VirtualTrade | null;
     pendingEntry: { entry: EntryEvent; plan: RiskPlan } | null;
-    pendingExit: { signalId: string } | null;
+    pendingExit: TrendExit | null;
 }
 
 export function exitText(reason: ExitReason): string {
@@ -66,6 +74,7 @@ export function exitText(reason: ExitReason): string {
         case 'TP2R': return '2R 停利';
         case 'TP3R': return '3R 停利';
         case 'REVERSAL': return '5m 反轉平倉';
+        case 'TREND_INVALID': return '5m 失效平倉';
     }
 }
 
@@ -84,10 +93,9 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
     const slip = cfg.slipTicks * tick;
     const atr1 = alignPoints(m1, atr(m1, 14));
     const atr5 = alignPoints(m5.bars, atr(m5.bars, 14));
-    const signalById = new Map(inp.signals.map((s) => [s.id, s]));
     const signalAtIndex = new Map(inp.signals.map((s) => [s.index, s]));
-    const queue = inp.entries.filter((e) => e.status === 'TRIGGERED' && e.barTime !== null)
-        .sort((a, b) => a.barTime! - b.barTime!);
+    const invalidAtIndex = new Map(inp.invalidations.map((v) => [v.index, v]));
+    const queue = [...inp.entries].sort((a, b) => a.barTime - b.barTime);
     let q = 0;
 
     const events: AuditEvent[] = [];
@@ -96,7 +104,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
     // 以 as 宣告：這些狀態只在下方的閉包裡改寫，避免 TS 把外層讀取窄化成 null
     let trade = null as VirtualTrade | null;
     let pendingEntry = null as PendingEntry | null;
-    let pendingExit = null as { signal: TrendSignal } | null;
+    let pendingExit = null as TrendExit | null;
     let pendingStop = null as { stop: number; reason: StopChange['reason'] } | null;
 
     const better = (dir: Direction, a: number, b: number) => (dir === 'LONG' ? Math.max(a, b) : Math.min(a, b));
@@ -111,11 +119,13 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         if (!trade || qty <= 0) return;
         const sign = trade.direction === 'LONG' ? 1 : -1;
         const n = Math.min(qty, trade.openQty);
+        const pv = trade.plan.pointValue;
         trade.fills.push({ time: t, price, qty: n, reason });
         trade.openQty -= n;
         const points = sign * (price - trade.fillPrice) * n;
         trade.realizedPoints += points;
-        trade.realizedNtd += points * trade.plan.pointValue - 2 * cfg.feePerSide * n;
+        const tax = futuresTax(trade.fillPrice, pv, inp.taxRate, n) + futuresTax(price, pv, inp.taxRate, n);
+        trade.realizedNtd += points * pv - 2 * cfg.feePerSide * n - tax;
         log(t, 'EXIT', trade.id, `${exitText(reason)} ${n} 口 @ ${price}`);
         if (trade.openQty === 0) {
             trade.status = 'CLOSED';
@@ -127,22 +137,20 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         }
     };
 
-    // 進場事件 → 等待下一根 1m 開盤成交（風控在此以參考價預估計畫）
+    // 提示 → 等待下一根 1m 開盤成交（風控在此以參考價預估計畫）
     const activate = (upTo: number, inclusive: boolean) => {
         while (q < queue.length) {
             const e = queue[q]!;
-            const bt = e.barTime!;
+            const bt = e.barTime;
             if (inclusive ? bt > upTo : bt >= upTo) break;
             q++;
-            const sig = signalById.get(e.signalId);
-            if (!sig) continue;
             if (pendingEntry) {
-                log(bt, 'WARN', e.id, '已有待成交的虛擬進場，略過');
+                log(bt, 'WARN', e.id, '已有待成交的虛擬進場，略過這次提示');
                 continue;
             }
             // 反向平倉已排定時允許：下一根開盤先平倉、再進場（兩筆獨立紀錄）
             if (trade && !pendingExit) {
-                log(bt, 'WARN', e.id, '已有虛擬部位，不加碼');
+                log(bt, 'WARN', e.id, '已有虛擬部位，略過這次提示（不加碼）');
                 continue;
             }
             const idx = lastAtOrBefore(m1, bt);
@@ -150,34 +158,38 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
             const a = idx >= 0 ? atr1[idx] : undefined;
             const plan = planRisk({
                 direction: e.direction,
-                entry: e.refPrice!,
+                entry: e.refPrice,
                 entryBasis: 'estimate',
                 swing,
                 atr: a,
                 tick,
                 pointValue: inp.pointValue,
+                taxRate: inp.taxRate,
                 cfg,
             });
-            if (plan.status !== 'OK' || a === undefined) {
-                log(bt, 'WARN', e.id, `${e.mode} 進場被風控拒絕：${plan.reason ?? '1m ATR 不足'}`);
+            if (plan.status !== 'OK' || a === undefined || idx < 0) {
+                log(bt, 'WARN', e.id, `${e.mode} 提示被風控拒絕：${plan.reason ?? '1m ATR 不足'}`);
                 continue;
             }
-            pendingEntry = { entry: e, plan, swing, atr: a, sessionEnd: sig.sessionEnd };
-            log(bt, 'ENTRY', e.id, `${e.mode} ${dirWord(e.direction)}單觸發（${e.reason}），待下一根 1m 開盤虛擬成交（觀察模式不送單）`);
+            pendingEntry = { entry: e, plan, swing, atr: a, sessionEnd: inp.m1SessionEnd[idx]! };
+            log(bt, 'PLAN', e.id, `${e.mode} 第 ${e.seq} 次${dirWord(e.direction)}單提示（${e.reason}），待下一根 1m 開盤虛擬成交（觀察模式不送單）`);
         }
     };
 
     const process5m = (j: number) => {
         const bar = m5.bars[j]!;
         const sig = signalAtIndex.get(j);
-        if (sig && trade && trade.direction !== sig.direction) {
-            pendingExit = { signal: sig };
+        const inv = invalidAtIndex.get(j);
+        if (trade && sig && trade.direction !== sig.direction) {
+            pendingExit = { ref: sig.id, reason: 'REVERSAL' };
             log(bar.time, 'WARN', trade.id, `5m 確認反向 ${sig.kind}：下一根 1m 開盤平${dirWord(trade.direction)}（不等 1m）`);
+        } else if (trade && inv && inv.from === trade.direction) {
+            pendingExit = { ref: inv.id, reason: 'TREND_INVALID' };
+            log(bar.time, 'WARN', trade.id, `5m ${dirWord(inv.from)}方趨勢失效（NEUTRAL）：下一根 1m 開盤平${dirWord(trade.direction)}（不等 1m）`);
         }
         if (trade && trade.trailing && !pendingExit) {
             const dir = trade.direction;
-            const want = dir === 'LONG' ? 'UP' : 'DOWN';
-            const support = t5.stopLine && t5.dir[j] === want ? t5.line[j] : undefined;
+            const support = t5.stopLine && t5.dir[j] === dir ? t5.line[j] : undefined;
             const next = trailStop(dir, pendingStop?.stop ?? trade.stop, support, trade.extreme, atr5[j], tick, cfg.trailAtr);
             queueStop(next, 'trail');
             const through = dir === 'LONG' ? next >= bar.close : next <= bar.close;
@@ -190,7 +202,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
     const openAt = (t: number, open: number) => {
         if (trade && pendingExit) {
             const px = trade.direction === 'LONG' ? open - slip : open + slip;
-            closeQty(t, px, trade.openQty, 'REVERSAL');
+            closeQty(t, px, trade.openQty, pendingExit.reason);
         }
         if (pendingEntry && !trade) {
             const pe = pendingEntry;
@@ -209,6 +221,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                     atr: pe.atr,
                     tick,
                     pointValue: inp.pointValue,
+                    taxRate: inp.taxRate,
                     cfg,
                     fixedQty: pe.plan.qty,
                 });
@@ -221,7 +234,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                         entryMode: pe.entry.mode,
                         signalId: pe.entry.signalId,
                         direction: dir,
-                        signalTime: pe.entry.barTime!,
+                        signalTime: pe.entry.barTime,
                         fillTime: t,
                         fillPrice: fill,
                         plan,
@@ -246,7 +259,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                     }
                     trades.push(vt);
                     trade = vt;
-                    log(t, 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（觸發 ${wallTime(pe.entry.barTime!)}），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
+                    log(t, 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（提示 ${wallTime(pe.entry.barTime)}），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
                     for (const w of vt.warnings) log(t, 'WARN', vt.id, w);
                 }
             }
@@ -316,12 +329,12 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
     }
     const open: VirtualTrade | null = trade;
     const pe: PendingEntry | null = pendingEntry;
-    const px: { signal: TrendSignal } | null = pendingExit;
+    const px: TrendExit | null = pendingExit;
     return {
         trades,
         events,
         open,
         pendingEntry: pe ? { entry: pe.entry, plan: pe.plan } : null,
-        pendingExit: px && open ? { signalId: px.signal.id } : null,
+        pendingExit: px && open ? px : null,
     };
 }
