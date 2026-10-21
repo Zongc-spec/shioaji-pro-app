@@ -19,7 +19,7 @@
 import { atr } from '../../indicators';
 import type { Candle } from '../../types/market';
 import { alignPoints, lastAtOrBefore } from '../core/bars';
-import { wallHm } from '../core/session';
+import { wallHm, wallTime } from '../core/session';
 import type {
     AuditEvent,
     Direction,
@@ -38,6 +38,13 @@ import type {
 import { futuresTax, planRisk, swingPoint, trailStop } from './plan';
 
 export interface VirtualInput {
+    /** 本圖週期模式的 K 棒時鐘；省略時精確保留原 1m/5m 模型。 */
+    clock?: {
+        baseLabel: string;
+        trendLabel: string;
+        openTime: (label: number) => number;
+        isNext: (from: number, to: number) => boolean;
+    };
     /** 已收 1m 與每根所屬交易時段的收盤 label */
     m1: Candle[];
     m1SessionEnd: number[];
@@ -98,6 +105,14 @@ interface PendingEntry {
 
 export function runVirtual(inp: VirtualInput): VirtualOutput {
     const { m1, m5, t5, cfg, tick } = inp;
+    const openTime = inp.clock?.openTime ?? ((t: number) => t - 60);
+    const baseLabel = inp.clock?.baseLabel ?? '1m';
+    const trendLabel = inp.clock?.trendLabel ?? '5m';
+    const clockText = baseLabel.startsWith('1D') ? wallTime : wallHm;
+    const when = (t: number, at: TradeFill['at']) => inp.clock
+        ? at === 'open' ? `${clockText(openTime(t))} ${baseLabel}開盤` : `${clockText(openTime(t))}–${clockText(t)} ${baseLabel}棒內`
+        : fillWhen(t, at);
+    const reasonText = (reason: ExitReason) => exitText(reason).replace('5m', trendLabel);
     const slip = cfg.slipTicks * tick;
     const atr1 = alignPoints(m1, atr(m1, 14));
     const atr5 = alignPoints(m5.bars, atr(m5.bars, 14));
@@ -139,7 +154,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         const cost = 2 * cfg.feePerSide * n + entryTax + futuresTax(price, pv, inp.taxRate, n);
         trade.costNtd += cost;
         trade.realizedNtd += points * pv - cost;
-        log(at === 'open' ? t - 60 : t, 'EXIT', trade.id, `${exitText(reason)} ${n} 口 @ ${price}（${fillWhen(t, at)}）`);
+        log(at === 'open' ? openTime(t) : t, 'EXIT', trade.id, `${reasonText(reason)} ${n} 口 @ ${price}（${when(t, at)}）`);
         if (trade.openQty === 0) {
             trade.status = 'CLOSED';
             trade.exitReason = reason;
@@ -181,11 +196,11 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                 cfg,
             });
             if (plan.status !== 'OK' || a === undefined || idx < 0) {
-                log(bt, 'WARN', e.id, `${e.mode} 提示被風控拒絕：${plan.reason ?? '1m ATR 不足'}`);
+                log(bt, 'WARN', e.id, `${e.mode} 提示被風控拒絕：${plan.reason ?? `${baseLabel} ATR 不足`}`);
                 continue;
             }
             pendingEntry = { entry: e, plan, swing, atr: a, sessionEnd: inp.m1SessionEnd[idx]! };
-            log(bt, 'PLAN', e.id, `${e.mode} 第 ${e.seq} 次${dirWord(e.direction)}單提示（${e.reason}），待下一根 1m 開盤虛擬成交（觀察模式不送單）`);
+            log(bt, 'PLAN', e.id, `${e.mode} 第 ${e.seq} 次${dirWord(e.direction)}單提示（${e.reason}），待下一根 ${baseLabel} 開盤虛擬成交（觀察模式不送單）`);
         }
     };
 
@@ -195,10 +210,10 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         const inv = invalidAtIndex.get(j);
         if (trade && sig && trade.direction !== sig.direction) {
             pendingExit = { ref: sig.id, reason: 'REVERSAL' };
-            log(bar.time, 'WARN', trade.id, `5m 確認反向 ${sig.kind}：下一根 1m 開盤平${dirWord(trade.direction)}（不等 1m）`);
+            log(bar.time, 'WARN', trade.id, `${trendLabel} 確認反向 ${sig.kind}：下一根 ${baseLabel} 開盤平${dirWord(trade.direction)}${inp.clock ? '' : '（不等 1m）'}`);
         } else if (trade && inv && inv.from === trade.direction) {
             pendingExit = { ref: inv.id, reason: 'TREND_INVALID' };
-            log(bar.time, 'WARN', trade.id, `5m ${dirWord(inv.from)}方趨勢失效（NEUTRAL）：下一根 1m 開盤平${dirWord(trade.direction)}（不等 1m）`);
+            log(bar.time, 'WARN', trade.id, `${trendLabel} ${dirWord(inv.from)}方趨勢失效（NEUTRAL）：下一根 ${baseLabel} 開盤平${dirWord(trade.direction)}${inp.clock ? '' : '（不等 1m）'}`);
         }
         if (trade && trade.trailing && !pendingExit) {
             const dir = trade.direction;
@@ -207,7 +222,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
             queueStop(next, 'trail');
             const through = dir === 'LONG' ? next >= bar.close : next <= bar.close;
             if (pendingStop?.reason === 'trail' && pendingStop.stop === next && through) {
-                log(bar.time, 'WARN', trade.id, `移動停損 ${next} 已在 5m 收盤 ${bar.close} 的錯誤一側：不建立觸價單，下一根開盤立即處理`);
+                log(bar.time, 'WARN', trade.id, `移動停損 ${next} 已在 ${trendLabel} 收盤 ${bar.close} 的錯誤一側：不建立觸價單，下一根開盤立即處理`);
             }
         }
     };
@@ -220,10 +235,10 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         if (pendingEntry && !trade) {
             const pe = pendingEntry;
             pendingEntry = null;
-            if (t > pe.sessionEnd) {
-                log(t - 60, 'WARN', pe.entry.id, '進場成交 K 棒已跨到下一盤，取消（不跨盤進場）');
-            } else if (t !== pe.entry.barTime + 60) {
-                log(t - 60, 'WARN', pe.entry.id, '下一根 1m 缺資料，取消虛擬進場（不延後到下一根現存 K 棒）');
+            if (inp.clock ? openTime(t) >= pe.sessionEnd : t > pe.sessionEnd) {
+                log(openTime(t), 'WARN', pe.entry.id, '進場成交 K 棒已跨到下一盤，取消（不跨盤進場）');
+            } else if (inp.clock ? !inp.clock.isNext(pe.entry.barTime, t) : t !== pe.entry.barTime + 60) {
+                log(openTime(t), 'WARN', pe.entry.id, `下一根 ${baseLabel} 缺資料，取消虛擬進場（不延後到下一根現存 K 棒）`);
             } else {
                 const dir = pe.entry.direction;
                 const fill = dir === 'LONG' ? open + slip : open - slip;
@@ -241,7 +256,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                     fixedQty: pe.plan.qty,
                 });
                 if (plan.status !== 'OK') {
-                    log(t - 60, 'WARN', pe.entry.id, `成交價 ${fill} 無法重新定價（${plan.reason ?? '風控拒絕'}），虛擬單取消`);
+                    log(openTime(t), 'WARN', pe.entry.id, `成交價 ${fill} 無法重新定價（${plan.reason ?? '風控拒絕'}），虛擬單取消`);
                 } else {
                     const vt: VirtualTrade = {
                         id: `${pe.entry.id}|VT#${inp.key}`,
@@ -251,7 +266,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                         direction: dir,
                         signalTime: pe.entry.barTime,
                         fillTime: t,
-                        fillAt: t - 60,
+                        fillAt: openTime(t),
                         fillPrice: fill,
                         plan,
                         qty: plan.qty,
@@ -276,8 +291,8 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                     }
                     trades.push(vt);
                     trade = vt;
-                    log(t - 60, 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${fillWhen(t, 'open')}；${wallHm(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
-                    for (const w of vt.warnings) log(t - 60, 'WARN', vt.id, w);
+                    log(openTime(t), 'FILL', vt.id, `虛擬${dirWord(dir)}單 ${plan.qty} 口 @ ${fill}（${when(t, 'open')}；${wallHm(pe.entry.barTime)} 收棒的提示），停損 ${plan.stop}，R ${plan.riskPoints} 點`);
+                    for (const w of vt.warnings) log(openTime(t), 'WARN', vt.id, w);
                 }
             }
         }
@@ -285,7 +300,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
             trade.stop = pendingStop.stop;
             trade.stopKind = pendingStop.reason;
             trade.stopHistory.push({ time: t, stop: pendingStop.stop, reason: pendingStop.reason });
-            log(t - 60, 'STOP_MOVE', trade.id, `${pendingStop.reason === 'breakeven' ? '保本' : '移動'}停損 → ${pendingStop.stop}（${wallHm(t - 60)} 開盤起生效）`);
+            log(openTime(t), 'STOP_MOVE', trade.id, `${pendingStop.reason === 'breakeven' ? '保本' : '移動'}停損 → ${pendingStop.stop}（${wallHm(openTime(t))} 開盤起生效）`);
             pendingStop = null;
         }
     };

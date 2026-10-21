@@ -10,7 +10,7 @@ import type { Candle } from '../types/market';
 export type TrendState = 'LONG' | 'SHORT' | 'NEUTRAL' | 'UNKNOWN';
 export type Direction = 'LONG' | 'SHORT';
 export type Alignment = 'ALIGN' | 'DIVERGE' | 'NEUTRAL';
-export type TfMinutes = 1 | 5 | 15 | 60;
+export type TfMinutes = number;
 export type TrendAlgoId = 'supertrend' | 'donchian' | 'kama';
 export type EntryMode = 'IMMEDIATE' | 'MICRO_TREND' | 'PRICE_STRUCTURE' | 'PULLBACK_KD';
 

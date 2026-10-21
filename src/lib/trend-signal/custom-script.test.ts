@@ -1,172 +1,155 @@
-// src/lib/trend-signal/custom-script.test.ts — docs/trend-signal-pro-custom.js（桌面版「自訂指標」用的
-// 單檔版本）以 App 的自訂指標執行器（custom-runtime）執行，與原生 Trend Signal Pro 逐根對照：
-// 5m 主圖的趨勢線、BUY／SELL、失效；1m 主圖的 5m 投影、訊號位置與 MICRO_TREND／PRICE_STRUCTURE 提示；
-// 進行中的 K 棒不產生訊號。三個 TrendCore 都比。
+// 真正 App 執行器跑產出的單檔；數值預期來自本圖核心交易與獨立逐根投影。
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runCustom, type BarsInput } from '../custom-runtime';
+import { runCustom, type BarsInput, type CustomRunResult } from '../custom-runtime';
 import type { Candle } from '../types/market';
-import { aggregate, wallClockToUtc } from '../utils/kbars';
-import { configFromParams, DEFAULT_CONFIG } from './config';
-import { projectCustomTsp } from './custom-adapter';
-import { lastAtOrBefore } from './core/bars';
-import { runTrendSignal } from './engine';
-import { sessionLabels, walkBars } from './fixtures.test-harness';
-import type { EntryMode, TrendAlgoId, TrendSignalConfig, TrendSignalResult } from './types';
+import { frameFromChart, runChartSignal } from './chart-custom';
+import { sessionLabels, T, walkBars } from './fixtures.test-harness';
+import { trendTrack } from './trend/signals';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const SOURCE = readFileSync(resolve(here, '../../../docs/trend-signal-pro-custom.js'), 'utf8');
-
-const ALGO_INDEX: Record<TrendAlgoId, number> = { supertrend: 0, donchian: 1, kama: 2 };
-const ALGOS: TrendAlgoId[] = ['supertrend', 'donchian', 'kama'];
-const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示',
+const SOURCE = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/trend-signal-pro-custom.js'), 'utf8');
+const DAY = 86400;
+const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '本圖微型提示', '本圖結構提示',
     '初始停損', '目前停損', '保本價', '1R', '2R', '3R', '虛擬進場多', '虛擬進場空',
     '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
-
-const labels = sessionLabels('2026-09-01', 4);
-const m1 = walkBars(labels, 11, { regime: 60 });
-const end = labels.at(-1)!;
-
+const LEVELS = ['初始停損', '目前停損', '保本價', '1R', '2R', '3R'];
 const toInput = (bars: Candle[]): BarsInput => ({
-    time: bars.map((b) => b.time),
-    open: bars.map((b) => b.open),
-    high: bars.map((b) => b.high),
-    low: bars.map((b) => b.low),
-    close: bars.map((b) => b.close),
-    volume: bars.map((b) => b.volume),
+    time: bars.map((b) => b.time), open: bars.map((b) => b.open), high: bars.map((b) => b.high),
+    low: bars.map((b) => b.low), close: bars.map((b) => b.close), volume: bars.map((b) => b.volume),
 });
-/** 把系統時間設成台灣牆鐘 now（腳本用它判斷該盤是否已收盤） */
+function chartBars(minutes: number): Candle[] {
+    const labels = minutes === 1440
+        ? Array.from({ length: 280 }, (_, i) => T('2025-01-01') + i * DAY)
+            .filter((t) => ![0, 6].includes(new Date(t * 1000).getUTCDay()))
+        : [...new Set(sessionLabels('2026-08-03', 40).map((t) => Math.ceil(t / (minutes * 60)) * minutes * 60))].slice(0, 360);
+    return walkBars(labels, 11, { regime: 24, drift: 8, vol: 4 });
+}
+const samples = new Map([1, 5, 15, 60, 1440].map((minutes) => [minutes, chartBars(minutes)]));
 const setNow = (now: number) => vi.setSystemTime((now - 8 * 3600) * 1000);
-/** 收盤（含定盤寬限）之後：最後一根也算收完，與原生 asOf ＝ 同一時刻相同 */
-const closedAt = end + 300;
-const cfgFor = (algo: TrendAlgoId, patch: (c: TrendSignalConfig) => TrendSignalConfig = (c) => c) =>
-    patch({ ...structuredClone(DEFAULT_CONFIG), trend: { ...DEFAULT_CONFIG.trend, algo } });
-const native = (config: TrendSignalConfig, bars = m1, asOf = end): TrendSignalResult =>
-    runTrendSignal({ bars1m: bars, asOf, securityType: 'FUT', symbol: 'TMFR1', contractMonth: '202609', tick: 1, pointValue: 10, config });
-function script(bars: Candle[], params: Record<string, number>, now: number) {
+function script(bars: Candle[], params: Record<string, number>, now: number): CustomRunResult {
     setNow(now);
-    const r = runCustom(SOURCE, toInput(bars), params);
-    if (r.error) throw new Error(r.error);
-    expect(r.order).toEqual(KEYS);
-    return r.outputs;
-}
-const marked = (ser: (number | null)[]) => ser.flatMap((v, i) => (v !== null ? [i] : []));
-const indexOfTime = (bars: Candle[], times: number[]) => times.map((t) => bars.findIndex((b) => b.time === t));
-
-/** 1m 主圖：每根（含進行中的那一根）只看當時已收的 5m；訊號落在 5m 收盤那根 1m；提示落在觸發的 1m */
-function expectOneMinuteParity(res: TrendSignalResult, bars: Candle[], out: Record<string, (number | null)[]>) {
-    bars.forEach((b, i) => {
-        const j = lastAtOrBefore(res.m5.bars, Math.min(b.time, res.asOf));
-        const d = j >= 0 ? res.t5.dir[j] : 'UNKNOWN';
-        expect(out['多方趨勢線']![i]).toBe(d === 'LONG' ? res.t5.line[j]! : null);
-        expect(out['空方趨勢線']![i]).toBe(d === 'SHORT' ? res.t5.line[j]! : null);
-    });
-    const at = (kind: 'BUY' | 'SELL') => indexOfTime(bars, res.signals.filter((s) => s.kind === kind).map((s) => s.barTime));
-    expect(marked(out.BUY!)).toEqual(at('BUY'));
-    expect(marked(out.SELL!)).toEqual(at('SELL'));
-    expect(marked(out['失效']!)).toEqual(indexOfTime(bars, res.invalidations.map((x) => x.barTime)));
-    const hints = (mode: EntryMode) => indexOfTime(bars, res.entries.filter((e) => e.mode === mode).map((e) => e.barTime)).sort((a, b) => a - b);
-    expect(marked(out['1m 微型提示']!)).toEqual(hints('MICRO_TREND'));
-    expect(marked(out['1m 結構提示']!)).toEqual(hints('PRICE_STRUCTURE'));
+    const result = runCustom(SOURCE, toInput(bars), params);
+    expect(result.error).toBeUndefined();
+    expect(result.order).toEqual(KEYS);
+    return result;
 }
 
-beforeEach(() => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-});
-afterEach(() => {
-    vi.useRealTimers();
+/** 不呼叫 projectCustomTsp：獨立從事件、部位生命週期與生效停損建立預期。 */
+function expectNumericProjection(app: CustomRunResult, frame: ReturnType<typeof frameFromChart>, result: ReturnType<typeof runChartSignal>, bars: Candle[]) {
+    const mapped = bars.map((b) => frame.daily ? b.time + DAY : b.time);
+    const marks = Object.fromEntries(KEYS.filter((key) => !LEVELS.includes(key) && !key.endsWith('趨勢線'))
+        .map((key) => [key, mapped.map((): number | null => null)]));
+    const put = (key: string, time: number, price: number) => {
+        mapped.forEach((t, i) => { if (t === time) marks[key]![i] = price; });
+    };
+    for (const s of result.signals) put(s.kind, s.barTime, s.close);
+    for (const x of result.invalidations) put('失效', x.barTime, frame.confirmed[x.index]!.close);
+    for (const e of result.entries) {
+        if (e.mode === 'MICRO_TREND') put('本圖微型提示', e.barTime, e.refPrice);
+        if (e.mode === 'PRICE_STRUCTURE') put('本圖結構提示', e.barTime, e.refPrice);
+    }
+    for (const vt of result.trades) {
+        put(vt.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空', vt.fillTime, vt.fillPrice);
+        for (const fill of vt.fills) {
+            const key = fill.reason === 'TP2R' ? '虛擬2R出場' : fill.reason === 'TP3R' ? '虛擬3R出場'
+                : ['REVERSAL', 'TREND_INVALID'].includes(fill.reason) ? '虛擬反轉失效出場' : '虛擬停損出場';
+            put(key, fill.time, fill.price);
+        }
+    }
+    for (const [key, expected] of Object.entries(marks)) expect(app.outputs[key]).toEqual(expected);
+    mapped.forEach((time, i) => {
+        const active = result.trades.filter((vt) => vt.fillTime <= time && (vt.closedAt === null || vt.closedAt >= time)).at(-1);
+        const stop = active?.stopHistory.filter((s) => s.time <= time).at(-1)?.stop;
+        const expected = active ? [active.plan.stop, stop ?? active.plan.stop, active.plan.breakevenStop, active.plan.r1, active.plan.r2, active.plan.r3] : LEVELS.map(() => null);
+        LEVELS.forEach((key, j) => expect(app.outputs[key]![i]).toBe(expected[j]));
+    });
+    const track = trendTrack(frame.series, frame.config.trend);
+    expect(result.t5).toEqual(track);
+    const last = track.dir.length - 1;
+    let start = last;
+    while (start > 0 && track.dir[start - 1] === track.dir[last]
+        && (frame.daily || (frame.confirmed[start]!.time - frame.confirmed[start - 1]!.time === frame.seconds
+            && frame.series.session[start] === frame.series.session[start - 1]))) start--;
+    mapped.forEach((time, i) => {
+        let j = frame.confirmed.length - 1;
+        while (j >= 0 && frame.confirmed[j]!.time > Math.min(time, frame.asOf)) j--;
+        const show = j >= start && j >= 0;
+        expect(app.outputs['多方趨勢線']![i]).toBe(show && track.dir[j] === 'LONG' ? track.line[j] ?? null : null);
+        expect(app.outputs['空方趨勢線']![i]).toBe(show && track.dir[j] === 'SHORT' ? track.line[j] ?? null : null);
+    });
+}
+
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); });
+afterEach(() => { vi.useRealTimers(); });
+
+describe.each([1, 5, 15, 60, 1440])('產出單檔在 App 真執行器：%im', (minutes) => {
+    it.each([0, 1, 2].flatMap((algo) => [0, 1, 2].map((entryMode) => [algo, entryMode] as const)))('核心 %i／進場 %i 的圖線、成交價與停損歷史逐根一致', (algo, entryMode) => {
+        const bars = samples.get(minutes)!;
+        const now = bars.at(-1)!.time + (minutes === 1440 ? 43200 : -10);
+        const params = { algo, entryMode, budget: 100000, qty: 3, riskHistory: 1 };
+        const frame = frameFromChart(toInput(bars), params, now);
+        const core = runChartSignal(frame);
+        expect(core.signals.length).toBeGreaterThan(0);
+        if (entryMode === 0) expect(core.trades.length).toBeGreaterThan(0);
+        const app = script(bars, params, now);
+        expectNumericProjection(app, frame, core, bars);
+        expect(app.hints['多方趨勢線']?.kind).toBe('line');
+        for (const key of LEVELS) expect(app.hints[key]?.kind).toBe('points');
+        for (const key of KEYS.slice(13)) expect(app.hints[key]?.kind).toBe('points');
+        for (const vt of core.trades) {
+            expect(vt.realizedNtd).toBeCloseTo(vt.realizedPoints * 10 - vt.costNtd, 8);
+            expect(vt.fillAt).toBe(vt.fillTime - minutes * 60);
+        }
+    });
 });
 
-describe.each(ALGOS)('自訂指標版 %s 與原生逐根相同', (algo) => {
-    const config = cfgFor(algo);
-    const res = native(config, m1, closedAt);
-
-    it('5m 主圖不能還原逐分鐘風控，明確提示切換 1m', () => {
-        const chart5 = aggregate(m1, 5);
-        expect(chart5).toEqual(res.m5.bars);
-        setNow(closedAt);
-        expect(runCustom(SOURCE, toInput(chart5), { algo: ALGO_INDEX[algo] }).error).toContain('1m');
+describe('單檔的顯示與錯誤界線', () => {
+    it('預設只畫目前持倉風控線；歷史進出 marker 仍保留且用 points', () => {
+        const bars = samples.get(15)!;
+        const now = bars.at(-1)!.time - 10;
+        const params = { budget: 100000, qty: 3 };
+        const core = runChartSignal(frameFromChart(toInput(bars), params, now));
+        const app = script(bars, params, now);
+        const open = core.snapshot.trade?.status === 'OPEN' ? core.snapshot.trade : null;
+        for (const key of LEVELS) {
+            expect(app.hints[key]?.kind).toBe('line');
+            bars.forEach((b, i) => { if (!open || b.time < open.fillTime) expect(app.outputs[key]![i]).toBeNull(); });
+        }
+        expect(core.trades.some((vt) => vt.status === 'CLOSED')).toBe(true);
+        for (const vt of core.trades) {
+            expect(app.outputs[vt.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空']![bars.findIndex((b) => b.time === vt.fillTime)]).toBe(vt.fillPrice);
+        }
     });
 
-    it('1m 主圖：5m 投影、訊號位置、MICRO_TREND／PRICE_STRUCTURE 提示', () => {
-        const out = script(m1, { algo: ALGO_INDEX[algo] }, closedAt);
-        expectOneMinuteParity(res, m1, out);
-        expect(res.entries.filter((e) => e.mode === 'MICRO_TREND').length).toBeGreaterThan(0);
-        expect(res.entries.filter((e) => e.mode === 'PRICE_STRUCTURE').length).toBeGreaterThan(0);
+    it('當前日線的大幅高低變動不提前發訊號、提示或確認停利', () => {
+        const bars = samples.get(1440)!;
+        const now = bars.at(-1)!.time + 43200;
+        const changed = bars.map((b, i) => i === bars.length - 1 ? { ...b, high: b.high + 10000, low: b.low - 10000 } : b);
+        const before = script(bars, { riskHistory: 1 }, now);
+        const after = script(changed, { riskHistory: 1 }, now);
+        for (const key of ['BUY', 'SELL', '失效', '本圖微型提示', '本圖結構提示', '虛擬2R出場', '虛擬3R出場']) expect(after.outputs[key]).toEqual(before.outputs[key]);
+        for (const key of ['BUY', 'SELL', '失效', '本圖微型提示', '本圖結構提示', '虛擬2R出場', '虛擬3R出場']) expect(after.outputs[key]!.at(-1)).toBeNull();
     });
-});
 
-describe('其他設定與邊界', () => {
-    it.each(ALGOS.flatMap((algo) => [0, 1, 2].map((entryMode) => [algo, entryMode] as const)))('真正單檔與 Web 共用核心的風控逐值一致：%s / mode %i', (algo, entryMode) => {
-        const params = { algo: ALGO_INDEX[algo], entryMode, qty: 3, budget: 100000, riskHistory: 1 };
-        const web = runTrendSignal({ bars1m: m1, live: null, asOf: end + 240, securityType: 'FUT', symbol: 'TMF', contractMonth: 'CUSTOM',
-            tick: 1, pointValue: 10, taxRate: 0.00002, config: configFromParams(params) });
-        const app = script(m1, params, closedAt);
-        expect(web.trades.length).toBeGreaterThan(0);
-        expect(web.trades.some((t) => t.fills.length > 0)).toBe(true);
-        expect(app).toEqual(projectCustomTsp(web, m1.map((b) => b.time)));
-        for (const trade of web.trades) {
-            const at = m1.findIndex((b) => b.time === trade.fillTime);
-            expect(app[trade.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空']![at]).toBe(trade.fillPrice);
-            expect(app['初始停損']![at]).toBe(trade.plan.stop);
-            expect(trade.realizedNtd).toBeCloseTo(trade.realizedPoints * 10 - trade.costNtd, 8);
+    it('非法 metadata、chartTf、riskHistory 透過執行器明確報錯', () => {
+        const bars = samples.get(5)!;
+        setNow(bars.at(-1)!.time);
+        const invalid: Record<string, number>[] = [{ tick: NaN }, { pointValue: Infinity }, { taxRate: -1 }, { chartTf: 0.5 }, { chartTf: 1441 }, { riskHistory: 2 }];
+        for (const params of invalid) {
+            expect(runCustom(SOURCE, toInput(bars), params).error).toBeTruthy();
+        }
+    });
+
+    it('空白與單根暖身仍提供19輸出，不以5m拒絕替代支援任意週期', () => {
+        for (const bars of [[], [samples.get(60)![0]!]]) {
+            const app = script(bars, { chartTf: 60 }, T('2026-10-20T10:00:00'));
+            for (const key of KEYS) expect(app.outputs[key]).toEqual(bars.map(() => null));
         }
     });
 
     it('單檔不包含網路、持久儲存或原生送單入口', () => {
         expect(SOURCE).not.toMatch(/\b(fetch|XMLHttpRequest|WebSocket|localStorage|__TAURI_INTERNALS__|place_order|cancel_order|update_price)\b/);
-    });
-
-    it('post-flip 窗口（hintWindow = 3 根 5m）', () => {
-        const res = native(cfgFor('supertrend', (c) => ({ ...c, entry: { ...c.entry, windowBars: 3 } })), m1, closedAt);
-        expectOneMinuteParity(res, m1, script(m1, { hintWindow: 3 }, closedAt));
-    });
-
-    it('非預設參數：Donchian(10)＋ATR×2、1m Donchian(10)、結構轉折 3／2、最小回檔 1 ATR', () => {
-        const res = native(cfgFor('donchian', (c) => ({
-            ...c,
-            trend: { ...c.trend, dcLength: 10, dcAtrMult: 2 },
-            entry: { ...c.entry, microDcLength: 10, pivotLeft: 3, pivotRight: 2, minPullbackAtr: 1 },
-        })), m1, closedAt);
-        const params = { algo: 1, dcLength: 10, dcAtrMult: 2, microDcLength: 10, pivotLeft: 3, pivotRight: 2, minPullbackAtr: 1 };
-        expectOneMinuteParity(res, m1, script(m1, params, closedAt));
-        expect(res.invalidations.length).toBeGreaterThan(0);
-    });
-
-    it('進行中的 K 棒（後面還沒有下一根、也還沒收盤）不產生訊號與提示：與原生在同一時點相同', () => {
-        for (const k of [900, 1555, 2210]) {
-            const bars = m1.slice(0, k + 2); // 第 k+1 根是進行中的 1m
-            const asOf = labels[k]! + 20;
-            const res = native(cfgFor('supertrend'), bars, asOf);
-            expect(res.m1.bars).toHaveLength(k + 1);
-            const out = script(bars, {}, asOf + 10);
-            expectOneMinuteParity(res, bars, out);
-            for (const key of ['BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示']) expect(out[key]![k + 1]).toBeNull();
-        }
-    });
-
-    it('缺分鐘的 5m 一樣排除（審查 P1：13:10 只剩 13:06）', () => {
-        const drop = new Set(['13:07', '13:08', '13:09', '13:10'].map((hm) => wallClockToUtc(`2026-09-02T${hm}:00`)));
-        const gapped = m1.filter((b) => !drop.has(b.time));
-        const res = native(cfgFor('supertrend'), gapped, closedAt);
-        expect(res.gaps).toHaveLength(1);
-        expectOneMinuteParity(res, gapped, script(gapped, {}, closedAt));
-    });
-
-    it('5m 桶內缺 1m 之後一樣不提示（2026-09-03 缺 12:28，12:29 的微型提示消失）', () => {
-        const t = (hm: string) => wallClockToUtc(`2026-09-03T${hm}:00`);
-        const gapped = m1.filter((b) => b.time !== t('12:28'));
-        const before = native(cfgFor('supertrend'), m1, closedAt);
-        const res = native(cfgFor('supertrend'), gapped, closedAt);
-        expect(before.entries.some((e) => e.mode === 'MICRO_TREND' && e.barTime === t('12:29'))).toBe(true);
-        expect(res.entries.some((e) => e.barTime === t('12:29'))).toBe(false);
-        expectOneMinuteParity(res, gapped, script(gapped, {}, closedAt));
-    });
-
-    it('驗證用的 300 根 1m 樣本可執行（編輯器驗證只要求 plot() 有輸出）', () => {
-        const out = script(m1.slice(0, 300), {}, closedAt);
-        expect(Object.keys(out)).toEqual(KEYS);
     });
 });

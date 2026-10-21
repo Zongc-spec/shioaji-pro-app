@@ -27,6 +27,7 @@ export interface EntryInputs {
     p: EntryParams;
     /** 進場參數指紋（提示 ID 用） */
     key: string;
+    chartMinutes?: number;
 }
 
 export interface EntryOutput {
@@ -46,7 +47,7 @@ export function computeEntries(inp: EntryInputs): EntryOutput {
     let seg: TrendSegment | null = null;
     let latest: [EntryMode, ModeResult][] = [];
     for (const sig of signals) {
-        seg = trendSegment(sig, { m1, m1SessionEnd: inp.m1SessionEnd, m1Hole: inp.m1Hole, m5: inp.m5, dir5: inp.dir5, windowBars: p.windowBars });
+        seg = trendSegment(sig, { m1, m1SessionEnd: inp.m1SessionEnd, m1Hole: inp.m1Hole, m5: inp.m5, dir5: inp.dir5, windowBars: p.windowBars, chartMinutes: inp.chartMinutes });
         latest = [
             ['IMMEDIATE', immediateHints(seg, inp.key)],
             ['MICRO_TREND', microTrendHints(seg, m1, inp.micro, inp.key)],
@@ -56,7 +57,7 @@ export function computeEntries(inp: EntryInputs): EntryOutput {
         for (const [, r] of latest) entries.push(...r.hints);
     }
     const closed = segmentClosed(seg!, asOf, p.windowBars);
-    const fresh = freshAt(inp.m5[inp.m5.length - 1]?.time, asOf, 5);
+    const fresh = freshAt(inp.m5[inp.m5.length - 1]?.time, asOf, inp.chartMinutes ?? 5);
     const hole = inp.m1Hole[m1.length - 1] === true;
     const states: Partial<Record<EntryMode, EntryModeState>> = {};
     for (const [mode, r] of latest) {

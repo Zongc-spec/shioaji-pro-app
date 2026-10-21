@@ -19,6 +19,8 @@ export interface SegmentInputs {
     m5: Candle[];
     dir5: TrendState[];
     windowBars: number;
+    /** 本圖模式：依實際 K 棒根數計窗口；省略時保留原 1m/5m 規則。 */
+    chartMinutes?: number;
 }
 
 export interface TrendSegment {
@@ -39,7 +41,8 @@ export function trendSegment(sig: TrendSignal, inp: SegmentInputs): TrendSegment
     while (k < m5.length && dir5[k] === sig.direction) k++;
     const endedAt = k < m5.length ? m5[k]!.time : null;
     const windowEnd = inp.windowBars > 0
-        ? Math.min(sig.barTime + inp.windowBars * 300, sig.sessionEnd)
+        ? Math.min(inp.chartMinutes === undefined ? sig.barTime + inp.windowBars * 300
+            : m5[sig.index + inp.windowBars]?.time ?? Infinity, sig.sessionEnd)
         : Number.POSITIVE_INFINITY;
     const bars: number[] = [];
     let j = sig.index; // label ≤ 這根 1m 的最後一根 5m
@@ -47,7 +50,7 @@ export function trendSegment(sig: TrendSignal, inp: SegmentInputs): TrendSegment
         const t = m1[m]!.time;
         if ((endedAt !== null && t >= endedAt) || t > windowEnd) break;
         while (j + 1 < m5.length && m5[j + 1]!.time <= t) j++;
-        if (!freshAt(m5[j]!.time, t, 5) || t >= inp.m1SessionEnd[m]! || inp.m1Hole[m]) continue;
+        if (!freshAt(m5[j]!.time, t, inp.chartMinutes ?? 5) || t >= inp.m1SessionEnd[m]! || inp.m1Hole[m]) continue;
         bars.push(m);
     }
     return { signal: sig, bars, endedAt, endState: endedAt !== null ? dir5[k]! : null, windowEnd };

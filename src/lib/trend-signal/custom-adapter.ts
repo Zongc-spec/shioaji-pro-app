@@ -26,8 +26,7 @@ type Outputs = Record<string, (number | null)[]>;
 const empty = (n: number): Outputs => Object.fromEntries(CUSTOM_TSP_PLOTS.map(([k]) => [k, new Array<number | null>(n).fill(null)]));
 
 /** 非法輸入必須回報錯誤，不能讓編輯器把全 null 當成有效風控。 */
-export function inputFromCustomBars(bars: BarsInput, params: Record<string, number> = {}, nowWall = nowWallClockUtc()): TrendSignalInput | null {
-    if (!Number.isFinite(nowWall)) throw new Error('計算時刻無效');
+export function normalizeCustomBars(bars: BarsInput, params: Record<string, number> = {}) {
     const n = bars.time.length;
     if ([bars.open, bars.high, bars.low, bars.close, bars.volume].some((a) => a.length !== n)) throw new Error('K 棒欄位長度不一致');
     for (const def of TSP_PARAMS) {
@@ -48,6 +47,12 @@ export function inputFromCustomBars(bars: BarsInput, params: Record<string, numb
         byTime.set(b.time, b);
     }
     const sorted = [...byTime.values()].sort((a, b) => a.time - b.time);
+    return { sorted, tick, pointValue, taxRate };
+}
+
+export function inputFromCustomBars(bars: BarsInput, params: Record<string, number> = {}, nowWall = nowWallClockUtc()): TrendSignalInput | null {
+    if (!Number.isFinite(nowWall)) throw new Error('計算時刻無效');
+    const { sorted, tick, pointValue, taxRate } = normalizeCustomBars(bars, params);
     if (sorted.length < 2) return null;
     let step = Infinity;
     for (let i = 1; i < sorted.length; i++) step = Math.min(step, sorted[i]!.time - sorted[i - 1]!.time);
@@ -69,7 +74,10 @@ export function inputFromCustomBars(bars: BarsInput, params: Record<string, numb
 }
 
 /** 以原始 chart time 映回索引；成交與停損生效用所屬 1m label，不把開盤時刻提前一根。 */
-export function projectCustomTsp(res: TrendSignalResult, chartTimes: number[], visibleThrough = Infinity, riskHistory = true): Outputs {
+export type CustomPlotResult = Pick<TrendSignalResult, 'asOf' | 'm1' | 'm5' | 't5' | 'signals' | 'invalidations' | 'entries' | 'trades'> & {
+    snapshot: Pick<TrendSignalResult['snapshot'], 'trade'>;
+};
+export function projectCustomTsp(res: CustomPlotResult, chartTimes: number[], visibleThrough = Infinity, riskHistory = true): Outputs {
     const out = empty(chartTimes.length);
     const indexes = new Map<number, number[]>();
     chartTimes.forEach((t, i) => { if (t <= visibleThrough) indexes.set(t, [...(indexes.get(t) ?? []), i]); });
