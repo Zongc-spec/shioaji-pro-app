@@ -482,6 +482,13 @@
 			def: 1,
 			min: 0,
 			max: 50
+		},
+		{
+			key: "riskModel",
+			label: "風控｜模型（0 1m 停損＋保本／1 5m 停損＋保本／2 5m 停損＋進場即移動停損）",
+			def: 0,
+			min: 0,
+			max: 2
 		}
 	];
 	var DEFAULTS = Object.fromEntries(TSP_PARAMS.map((p) => [p.key, p.def]));
@@ -522,6 +529,7 @@
 			minPullbackAtr: param(p, "minPullbackAtr")
 		};
 		const singleExit = int(p, "singleExit");
+		const riskModel = int(p, "riskModel");
 		return {
 			trend,
 			note,
@@ -537,7 +545,8 @@
 				singleExit: singleExit === 2 ? 2 : singleExit === 3 ? 3 : 1,
 				tierMode: int(p, "tierMode") >= 1 ? "custom" : "auto",
 				tp2Lots: int(p, "tp2Lots"),
-				tp3Lots: int(p, "tp3Lots")
+				tp3Lots: int(p, "tp3Lots"),
+				riskModel: riskModel === 2 ? 2 : riskModel === 1 ? 1 : 0
 			}
 		};
 	}
@@ -931,7 +940,7 @@
 		};
 		if (inp.atr === void 0 || !(inp.atr > 0)) return {
 			...base,
-			reason: "1m ATR 資料不足，無法計算停損"
+			reason: "ATR 資料不足，無法計算停損"
 		};
 		const atrStop = entry - sign * cfg.stopAtr * inp.atr;
 		let raw = atrStop;
@@ -1099,8 +1108,9 @@
 					continue;
 				}
 				const idx = lastAtOrBefore(m1, bt);
-				const swing = idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : void 0;
-				const a = idx >= 0 ? atr1[idx] : void 0;
+				const j5 = cfg.riskModel === 0 ? -1 : lastAtOrBefore(m5.bars, bt);
+				const swing = cfg.riskModel === 0 ? idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : void 0 : j5 >= 1 ? swingPoint(m5.bars, j5, cfg.swingBars, e.direction) : void 0;
+				const a = cfg.riskModel === 0 ? idx >= 0 ? atr1[idx] : void 0 : j5 >= 0 ? atr5[j5] : void 0;
 				const plan = planRisk({
 					direction: e.direction,
 					entry: e.refPrice,
@@ -1196,7 +1206,7 @@
 								stop: plan.stop,
 								reason: "initial"
 							}],
-							trailing: false,
+							trailing: cfg.riskModel === 2,
 							hit: {
 								r1: null,
 								r2: null,
@@ -1250,8 +1260,11 @@
 			const p = vt.plan;
 			if (vt.hit.r1 === null && reached(p.r1)) {
 				vt.hit.r1 = t;
-				log(t, "TARGET", vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
-				queueStop(p.breakevenStop, "breakeven");
+				if (cfg.riskModel === 2) log(t, "TARGET", vt.id, `+1R ${p.r1} 到價（風控模型 2 不移保本，停損跟隨 ${trendLabel} 移動）`);
+				else {
+					log(t, "TARGET", vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
+					queueStop(p.breakevenStop, "breakeven");
+				}
 			}
 			if (vt.hit.r2 === null && reached(p.r2)) {
 				vt.hit.r2 = t;

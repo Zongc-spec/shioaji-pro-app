@@ -3,12 +3,13 @@
 // 以及虛擬部位的成交、停損優先、保本、分批停利、5m 反向／失效立即出場、不跨盤、
 // 同段趨勢多次提示（持倉時略過、停損後可再進場）。
 import { describe, expect, it } from 'vitest';
+import { atr } from '../../indicators';
 import type { Candle } from '../../types/market';
-import { buildTf } from '../core/bars';
+import { alignPoints, buildTf } from '../core/bars';
 import { DEFAULT_CONFIG } from '../config';
 import { T } from '../fixtures.test-harness';
 import type { EntryEvent, RiskConfig, TrendInvalidation, TrendSignal, TrendState, TrendTrack } from '../types';
-import { allocateTiers, ceilTick, floorTick, futuresTax, planRisk, roundTripCost, swingPoint, trailStop } from './plan';
+import { allocateTiers, awayTick, ceilTick, floorTick, futuresTax, planRisk, roundTripCost, swingPoint, trailStop } from './plan';
 import { runVirtual } from './virtual';
 
 const R: RiskConfig = DEFAULT_CONFIG.risk;
@@ -346,5 +347,44 @@ describe('虛擬部位', () => {
         const s = sig('BUY', 1, T('2026-10-20T13:35:00'), dayEnd);
         const v = run(m1, [s], [entry(s, T('2026-10-20T15:10:00'), 100, 2)]);
         expect(v.trades[0]).toMatchObject({ fillTime: T('2026-10-20T15:11:00'), status: 'OPEN' });
+    });
+});
+
+describe('風控模型（riskModel）', () => {
+    // 每個 5m 桶內 1m 先漲後跌（100→110→100）：1m 波動小、5m 波動大，兩種停損依據分得開
+    const wave = (n: number, from = 0) => Array.from({ length: n }, (_, i) => {
+        const lv = [100, 105, 110, 105, 100][(from + i) % 5]!;
+        return bar(t0 + 60 * (from + i + 1), lv, lv + 1, lv - 1, lv);
+    });
+    const m1 = wave(120); // 09:01–11:00，24 根 5m
+    const S = sig('BUY', 19, t0 + 6000); // 5m 10:40
+    const atr5At = (bars: Candle[], label: number) => {
+        const m5 = buildTf(bars, 5, 'FUT', bars.at(-1)!.time).bars;
+        return alignPoints(m5, atr(m5, 14))[m5.findIndex((b) => b.time === label)]!;
+    };
+
+    it('模型 1：初始停損改依 5m 的擺動點／ATR（比 1m 寬），保本與移動規則不變', () => {
+        const v0 = run(m1, [S], [entry(S)]).trades[0]!;
+        const v1 = run(m1, [S], [entry(S)], { cfg: { riskModel: 1 } }).trades[0]!;
+        expect(v1.fillPrice).toBe(v0.fillPrice);
+        // 5m 桶都一樣，沒有嚴格的 5m 擺動低點 → 只用 5m ATR
+        expect(v1.plan.stop).toBe(awayTick('LONG', v1.fillPrice - R.stopAtr * atr5At(m1, S.barTime), 1));
+        expect(v1.plan.riskPoints).toBeGreaterThan(v0.plan.riskPoints);
+    });
+
+    it('模型 2：+1R 不移保本；進場後每根 5m 收棒就移動停損（不等 +2R）', () => {
+        // 10:41 起續漲（每分鐘 +2），過 +1R 但不到 +2R
+        const up = Array.from({ length: 15 }, (_, i) => bar(t0 + 60 * (121 + i), 100 + 2 * i, 101 + 2 * i, 99 + 2 * i, 100 + 2 * i));
+        const bars = [...m1, ...up];
+        const s2 = sig('BUY', 23, t0 + 7200); // 5m 11:00
+        const v2 = run(bars, [s2], [entry(s2)], { cfg: { riskModel: 2 } }).trades[0]!;
+        const v1 = run(bars, [s2], [entry(s2)], { cfg: { riskModel: 1 } }).trades[0]!;
+        expect(v2.plan.stop).toBe(v1.plan.stop);
+        expect(v1.hit.r1).not.toBeNull();
+        expect(v1.stopHistory.map((x) => x.reason)).toContain('breakeven');
+        expect(v2.stopHistory.map((x) => x.reason)).not.toContain('breakeven');
+        expect(v2.hit.r2).toBeNull();
+        expect(v2.stopHistory.some((x) => x.reason === 'trail')).toBe(true);
+        expect(v1.stopHistory.some((x) => x.reason === 'trail')).toBe(false);
     });
 });

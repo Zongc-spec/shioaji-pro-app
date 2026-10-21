@@ -366,7 +366,7 @@ export function TrendSignalPanel({
                                     <span className={s.dir[open.direction]}>{open.direction === 'LONG' ? '多' : '空'}</span>{' '}
                                     {open.openQty}/{open.qty} 口 @ {px(open.fillPrice)}（{fillWhen(open.fillTime, 'open')}成交；{MODE_TEXT[open.entryMode]} {hm(open.signalTime)} 收棒的提示）
                                 </div>
-                                <div>初始停損 {px(open.plan.stop)}（{open.plan.stopBasis === 'swing' ? '擺動點' : open.plan.stopBasis === 'atr' ? '1m ATR' : 'ATR 備援'}）· R {open.plan.riskPoints} 點／{money(open.plan.riskPerLot * open.qty)}</div>
+                                <div>初始停損 {px(open.plan.stop)}（{open.plan.stopBasis === 'swing' ? '擺動點' : open.plan.stopBasis === 'atr' ? 'ATR' : 'ATR 備援'}）· R {open.plan.riskPoints} 點／{money(open.plan.riskPerLot * open.qty)}</div>
                                 <div>1R {px(open.plan.r1)} · 2R {px(open.plan.r2)} · 3R {px(open.plan.r3)} · 保本 {px(open.plan.breakevenStop)}</div>
                                 <div>目前停損 {px(open.stop)}（{open.stopKind === 'initial' ? '初始' : open.stopKind === 'breakeven' ? '保本' : '移動'}）{open.trailing ? ' · 移動停損啟動' : ''}</div>
                                 <div>

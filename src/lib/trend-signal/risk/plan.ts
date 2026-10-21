@@ -132,7 +132,7 @@ export function planRisk(inp: PlanInput): RiskPlan {
     if (inp.pointValue === null || !(inp.pointValue > 0)) {
         return { ...base, reason: '商品每點價值未知，無法換算新臺幣風險' };
     }
-    if (inp.atr === undefined || !(inp.atr > 0)) return { ...base, reason: '1m ATR 資料不足，無法計算停損' };
+    if (inp.atr === undefined || !(inp.atr > 0)) return { ...base, reason: 'ATR 資料不足，無法計算停損' };
     const atrStop = entry - sign * cfg.stopAtr * inp.atr;
     let raw = atrStop;
     let basis: RiskPlan['stopBasis'] = 'atr-fallback';

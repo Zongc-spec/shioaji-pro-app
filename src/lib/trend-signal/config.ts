@@ -54,6 +54,7 @@ export const TSP_PARAMS: ParamDef[] = [
     { key: 'tierMode', label: '風控｜多口分配（0 規格表／1 自訂）', def: 0, min: 0, max: 1 },
     { key: 'tp2Lots', label: '風控｜自訂 2R 停利口數', def: 1, min: 0, max: 50 },
     { key: 'tp3Lots', label: '風控｜自訂 3R 停利口數', def: 1, min: 0, max: 50 },
+    { key: 'riskModel', label: '風控｜模型（0 1m 停損＋保本／1 5m 停損＋保本／2 5m 停損＋進場即移動停損）', def: 0, min: 0, max: 2 },
 ];
 
 /** legend 只顯示趨勢核心參數 */
@@ -94,6 +95,7 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
         minPullbackAtr: param(p, 'minPullbackAtr'),
     };
     const singleExit = int(p, 'singleExit');
+    const riskModel = int(p, 'riskModel');
     const risk: RiskConfig = {
         budget: param(p, 'budget'),
         feePerSide: param(p, 'feePerSide'),
@@ -106,6 +108,7 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
         tierMode: int(p, 'tierMode') >= 1 ? 'custom' : 'auto',
         tp2Lots: int(p, 'tp2Lots'),
         tp3Lots: int(p, 'tp3Lots'),
+        riskModel: riskModel === 2 ? 2 : riskModel === 1 ? 1 : 0,
     };
     return { trend, note, entry, risk };
 }
