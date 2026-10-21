@@ -33,7 +33,7 @@ describe('模擬警示去重', () => {
 describe('審計匯出', () => {
     it('包含計算版本、演算法與參數、唯讀權限、資料來源與所有紀錄', () => {
         const out = auditExport(res, DEFAULT_CONFIG);
-        expect(out.version).toBe('tsp-1.1.1');
+        expect(out.version).toBe('tsp-1.1.2');
         expect(out.configKey).toBe(res.configKey);
         expect(out.algorithm).toBe('SuperTrend ATR 10 × 3');
         expect(out.permissions).toEqual({ read_only: true, auto_entry: false, auto_exit: false });

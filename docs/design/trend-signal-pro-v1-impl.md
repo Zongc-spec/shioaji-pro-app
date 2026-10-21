@@ -303,3 +303,59 @@ stale。Dashboard 標「過期」；5m 過期時 1m 不提示。15m／60m 只註
 測試：`npm test` 234 files passed／1 skipped、3671 tests passed／2 skipped；`tsc -b`、`vite build` 通過。展示頁的審計視窗與徽章
 沒有在瀏覽器實際截圖核對（本次啟動展示頁伺服器的權限被拒）；新增展示頁參數 `&audit=trades` 可直接打開審計的虛擬部位分頁。
 進 main 前仍需依 DEV.md 跑 AI review（`/code-review`）與 QA 驗收。
+
+## tsp-1.1.2：Codex 接手第二輪修正（2026-10-21）
+
+基線 `81b2b93`（程式 `a57ed65`）；Claude 配額中斷時原分支沒有未提交變更。實作在隔離工作樹
+`fix/tsp-feed-confirmation` 進行，保留既有 TrendCore、EntryTiming、費率與唯讀權限。
+本節描述此版的離線驗證與瀏覽器展示頁 QA，不代替使用者驗收、原生 App 實測或實際交易驗證。
+上節 D23 中「心跳接收時間可以推進涵蓋」由本節取代；1.1.1 的原始紀錄保留。
+
+### 修正與回歸
+
+| 問題 | 本版處理 | 可檢查證據 |
+|---|---|---|
+| P1 隱藏／不顯示指標的週期停用逐筆 listener，重新啟用仍沿用舊涵蓋 | listener cleanup 呼叫 `LiveFeed.pause()`，撤銷逐筆涵蓋；保留 frozen，漏收區間等歷史補抓 | `use-trend-signal.test.tsx` 同 code／epoch、同 revision 舊快取重啟反例；`feed.test.ts` 暫停後的新 tick 不能跨缺口，補抓後資料可恢復 |
+| P1 延遲心跳用本機收到時間，提前凍結尚在佇列的成交 | 心跳只用於串流連線健康，不推進資料 asOf；連續接收的交易所成交時間或伺服器歷史才確認 | 10:00:30 心跳於 10:01:15 到達，10:00:50 tick 仍可入；core 與真正 React hook 的回歸 |
+| 較舊 patch／full 回應反向完成，payload 倒退但沿用較新水位 | `setHistory()` 拒絕涵蓋時間落後的回應 | `feed.test.ts` 新 full 後接舊 patch，10:01 不會被刪掉並永久凍結 |
+| 舊商品的 patch finally 釋放新商品的鎖；historyVer 重算又誤取消有效 patch | 寫入與 finally 都驗 request identity；停用／換商品撤銷 record，同接收週期的重算保留有效補抓 | hook 測試與獨立 deferred request 反例；A 晚完成不能令 B 重複補抓 |
+| 移除心跳推進後，安靜市場卡在午休／週末的非交易分鐘 | 只用 now 掃描下一個到期的正規分鐘來排補抓，不推進 asOf | `feed.test.ts` 日盤轉夜盤、週五夜盤轉週一日盤 |
+| 已初始化 A 切 B，當輪 effect 仍有舊 historyVer，新 feed 從 −Infinity 掃描 | snapshot 未初始化守門、hook 非有限 asOf 守門 | core 與 hook 切商品測試 |
+| 多口分批重複取整進場稅 | 按累計已平口數分配進場稅，分配總和等於整筆口數的取整稅額 | 兩口回歸原成本 68、應為 67；修正後進場稅分配 5＋4＝9；不改單口結果 |
+
+安靜市場在分鐘結束 45 秒後才排補抓，兩次至少相隔 15 秒；補抓失敗繼續等待，不承諾最長確認時間。
+此版沒有引入新的 broker／行情服務或持久化架構。
+
+### 驗證結果
+
+- 修正前：`./node_modules/.bin/vitest run src/lib/trend-signal/core/feed.test.ts --maxWorkers=2 -t '延遲心跳|較舊歷史'`
+  exit 1，兩項反例都失敗；修正後同指令 exit 0。hook 停用重啟、舊請求 finally 及多口成本也先紅後綠。
+- `./node_modules/.bin/vitest run src/lib/trend-signal/core/feed.test.ts --maxWorkers=2`：exit 0，14 tests。
+- `npm exec -- vitest run src/hooks/use-trend-signal.test.tsx --maxWorkers=2`：exit 0，6 tests。
+- `./node_modules/.bin/vitest run src/lib/trend-signal/risk/risk.test.ts --maxWorkers=2`：exit 0，27 tests。
+- `./node_modules/.bin/vitest run --maxWorkers=2`：exit 0；235 files passed／1 skipped、3684 tests passed／2 skipped。
+- `./node_modules/.bin/tsc -b`、`npm run build`：exit 0。build 仍有既有 target／dynamic-import 警告，未改其它交易模組。
+- 獨立 `trading_auditor` 以 `node --input-type=commonjs` 的記憶體白名單 loader 執行六類 feed、48 個 LONG／SHORT 部分與全部平倉成本、
+  兩個 hook 生命週期反例，共 56 例，各命令 exit 0；最終 finder review 沒有未解阻擋。
+- 工程相容性：固定合成 1m、三種核心 × 三種 EntryTiming、單口，與未變動的 `81b2b93` 原工作樹輸出比較，
+  除計算版本與 ID 外逐欄相同（`node` 記憶體檢查 exit 0）。首次使用 Node 子程序呼叫 git 的方案遇 `spawnSync git EPERM`／exit 1，
+  改為直接唯讀載入原工作樹，沒有放寬權限或修改基線。這不是新的市場研究。
+
+獨立審查所核對的實作 SHA-256：feed `489ec769345b8039a411777c11b47b420358aca04035131a64a688b41ba1ad41`；
+hook `ec95c6fe5282ffdcfcbeda268a457f66b81422c0a746a1418d02606401297d75`；
+virtual `f1c091e87fa18644f7cee4711019f61e1f485fbb69ec413362b16d84b0b02f71`。
+
+### 畫面與剩餘界線
+
+展示頁明確綁定 loopback、strictPort 與 `Content-Security-Policy: connect-src 'self'`；歷史、帳戶、下單由既有 stub 隔離。
+5298 被占用時沒有接管，改用 5299；HTTP 首頁與合成 endpoint 為 200，沒有指定外部行情檔。
+一般 sandbox 的 Vite 啟動 EPERM、Windows Chrome 的 WSL vsock 啟動錯誤均保留；在本次已授權 QA 的 tool escalation 後，
+Windows Chrome headless 使用 `/tmp` 的獨立 UNC profile 成功，exit 0，實際寫出 312,003 bytes。
+新截圖：[1.1.2 審計，合成資料](../images/trend-signal-pro-audit-1.1.2.png)，SHA-256
+`fc47d6d9ff136c1315aa48ef9d5f3441dfdc9e5357c45ec6506a43f9dad5a9cc`。
+已實際檢視成本欄、合計、成交開盤／觸價區間與 `tsp-1.1.2` 版本；畫面中的獲利是合成示例，不是績效證據。
+Chrome 對 UNC profile 的 cache／DB 有警告；自建 server 與 profile 均已清理，既有服務未接管。
+
+原生桌面 App、真實 SSE／網路延遲、券商帳單取整尚未實測；審計分頁互動沒有做瀏覽器自動斷言。
+原有兩年 Gate 5 與實際資料回放仍保留為 `tsp-1.1.1` 的歷史結果，本輪沒有重跑或宣稱為 `1.1.2` 的新績效。
+自訂指標的缺乏凍結／5m 主圖完整性限制維持已揭露範圍；P4 沒有啟用。

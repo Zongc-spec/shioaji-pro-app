@@ -44,13 +44,13 @@ describe('P1 回歸：已確認的分鐘不被晚到成交改寫', () => {
         expect(r.signals.find((s) => s.barTime === bar.time)?.kind).toBe('SELL');
     });
 
-    it('心跳確認 02:40 之後到的同分鐘成交被忽略並計數；訊號不變', () => {
+    it('下一筆成交確認 02:40 之後到的同分鐘成交被忽略並計數；訊號不變', () => {
         const feed = new LiveFeed('FUT');
         feed.observe(1, null, bar.time - 120);
         feed.setHistory(m1.slice(0, k), m1[k - 1]!.time + 20);
         for (const t of ticksOf(bar)) feed.onTick(t, 1, t.time + 1);
-        // 02:40 之後沒有新成交，但 02:40:15 的心跳證明那之前的資料都已送達
-        feed.observe(1, bar.time + 15, bar.time + 16);
+        // 以交易所時間跨過 02:40 的下一筆成交確認，不使用心跳接收時間。
+        feed.onTick({ time: bar.time + 2, price: m1[k + 1]!.open, volume: 1 }, 1, bar.time + 3);
         const s1 = feed.snapshot(bar.time + 16);
         expect(s1.asOf).toBeGreaterThanOrEqual(bar.time);
         expect(s1.pendingFrom).toBeNull();
@@ -81,6 +81,38 @@ describe('P1 回歸：已確認的分鐘不被晚到成交改寫', () => {
 describe('資料涵蓋才確認', () => {
     const day = (hm: string) => at(`2026-09-02T${hm}:00`);
     const kStart = idx(day('10:00'));
+
+    it('延遲心跳只證明連線健康，不提前凍結仍在佇列中的成交', () => {
+        const feed = new LiveFeed('FUT');
+        feed.observe(1, null, day('09:59'));
+        feed.setHistory(m1.slice(0, kStart + 1), day('10:00') + 20);
+        feed.commit(feed.snapshot(day('10:00') + 20).asOf);
+        feed.onTick({ time: day('10:00') + 10, price: 101, volume: 1 }, 1, day('10:00') + 11);
+        // 10:00:30 產生的心跳到 10:01:15 才收到；本機時鐘正確、64 秒尚未超過 watchdog。
+        feed.observe(1, day('10:01') + 15, day('10:01') + 15);
+        const before = feed.snapshot(day('10:01') + 15);
+        expect(before.asOf).toBeLessThan(day('10:01'));
+        feed.commit(before.asOf);
+        feed.onTick({ time: day('10:00') + 50, price: 150, volume: 1 }, 1, day('10:01') + 16);
+        const after = feed.snapshot(day('10:01') + 16);
+        expect(after.lateTicks).toBe(0);
+        expect(after.bars.at(-1)).toMatchObject({ time: day('10:01'), close: 150 });
+    });
+
+    it('較舊歷史回應不能覆蓋較新的 payload 卻沿用新涵蓋時間', () => {
+        const feed = new LiveFeed('FUT');
+        const old = m1.slice(0, kStart + 1);
+        const fresh = m1.slice(0, kStart + 2);
+        feed.setHistory(old, day('10:00') + 20);
+        feed.commit(feed.snapshot(day('10:00') + 20).asOf);
+        feed.setHistory(fresh, day('10:01') + 20);
+        feed.setHistory(old, day('10:01') + 5, true);
+        const s = feed.snapshot(day('10:01') + 21);
+        expect(s.bars.find((b) => b.time === day('10:01'))).toEqual(fresh.at(-1));
+        feed.commit(s.asOf);
+        feed.setHistory(fresh, day('10:01') + 30);
+        expect(feed.snapshot(day('10:01') + 31).bars.find((b) => b.time === day('10:01'))).toEqual(fresh.at(-1));
+    });
 
     function streamUntil(feed: LiveFeed, epoch: number, fromIdx: number, toTime: number) {
         for (let i = fromIdx; i < m1.length && m1[i]!.time - 60 < toTime; i++) {
@@ -136,25 +168,62 @@ describe('資料涵蓋才確認', () => {
         expect(s2.bars.filter((b) => b.time > s.asOf)).toEqual(edited.slice(kStart + 1));
     });
 
-    it('安靜市場：沒有成交、只有心跳時照常確認（沒有成交的分鐘不必等）', () => {
+    it('安靜市場：心跳不確認行情，45 秒後補抓歷史，涵蓋後才確認', () => {
         const feed = new LiveFeed('FUT');
         feed.observe(1, null, day('09:59') - 30);
         feed.setHistory(m1.slice(0, kStart + 1), day('10:00') + 20);
         for (const t of ticksOf(m1[kStart + 1]!)) feed.onTick(t, 1, t.time + 1); // 10:01 有成交，之後沒有
         feed.observe(1, day('10:04') + 15, day('10:04') + 16);
-        const s = feed.snapshot(day('10:04') + 16);
-        expect(s.pendingFrom).toBeNull();
-        expect(s.asOf).toBeGreaterThanOrEqual(day('10:04'));
-        // 10:05 結束 10 秒、下一次心跳（10:05:15）之前：只是還沒確認，不算缺資料（不顯示補齊中、不補抓）
-        const waiting = feed.snapshot(day('10:05') + 10);
-        expect(waiting.asOf).toBeLessThan(day('10:05'));
+        const waiting = feed.snapshot(day('10:01') + HEARTBEAT_WAIT_SEC - 1);
+        expect(waiting.asOf).toBeLessThan(day('10:01'));
         expect(waiting.pendingFrom).toBeNull();
         expect(waiting.historyWantedAt).toBeNull();
-        feed.observe(1, day('10:05') + 15, day('10:05') + 16);
-        expect(feed.snapshot(day('10:05') + 16)).toMatchObject({ pendingFrom: null, asOf: day('10:05') + 5 });
-        // 之後串流沒有成交也沒有心跳：10:06 結束後過了一次心跳週期，當成可能卡住，改等補抓
-        expect(feed.snapshot(day('10:06') + HEARTBEAT_WAIT_SEC - 1).pendingFrom).toBeNull();
-        expect(feed.snapshot(day('10:06') + HEARTBEAT_WAIT_SEC).pendingFrom).toBe(day('10:06'));
+        expect(feed.snapshot(day('10:01') + HEARTBEAT_WAIT_SEC).pendingFrom).toBe(day('10:01'));
+        feed.setHistory(m1.slice(0, idx(day('10:04')) + 1), day('10:04') + 20);
+        expect(feed.snapshot(day('10:04') + 21)).toMatchObject({ pendingFrom: null, asOf: day('10:04') + 10 });
+    });
+
+    it('暫停接收後，同一 epoch 的新成交不能跨過漏收區間；歷史補抓仍可修復未確認分鐘', () => {
+        const feed = new LiveFeed('FUT');
+        feed.observe(1, null, day('09:59'));
+        feed.setHistory(m1.slice(0, kStart + 1), day('10:00') + 20);
+        const before = feed.snapshot(day('10:00') + 20);
+        feed.commit(before.asOf);
+        feed.onTick({ time: day('10:00') + 10, price: 101, volume: 1 }, 1, day('10:00') + 11);
+        feed.pause();
+        feed.observe(1, day('10:04') + 15, day('10:04') + 20);
+        feed.onTick({ time: day('10:04') + 21, price: 102, volume: 1 }, 1, day('10:04') + 22);
+        const pending = feed.snapshot(day('10:04') + 23);
+        expect(pending.asOf).toBeLessThan(day('10:01'));
+        expect(pending.pendingFrom).toBe(day('10:01'));
+        feed.commit(pending.asOf);
+        feed.setHistory(m1.slice(0, idx(day('10:05')) + 1), day('10:05') + 20);
+        const after = feed.snapshot(day('10:05') + 21);
+        expect(after.bars.filter((b) => b.time <= before.asOf)).toEqual(before.bars.filter((b) => b.time <= before.asOf));
+        expect(after.bars.find((b) => b.time === day('10:03'))).toEqual(m1[idx(day('10:03'))]);
+        expect(after.bars.find((b) => b.time === day('10:01'))).toEqual(m1[kStart + 1]);
+    });
+
+    it.each([
+        ['2026-09-02T13:45:00', '2026-09-02T15:01:00'],
+        ['2026-09-05T05:00:00', '2026-09-07T08:46:00'],
+    ])('安靜市場跨休市：%s 後會補抓下一個正規分鐘 %s', (last, next) => {
+        const feed = new LiveFeed('FUT');
+        const label = at(last);
+        feed.observe(1, null, label - 120);
+        feed.setHistory([{ time: label, open: 100, high: 100, low: 100, close: 100, volume: 1 }], label + 20);
+        feed.commit(feed.snapshot(label + 20).asOf);
+        const pending = feed.snapshot(at(next) + HEARTBEAT_WAIT_SEC);
+        expect(pending.asOf).toBe(label + 10);
+        expect(pending.pendingFrom).toBe(at(next));
+        expect(pending.historyWantedAt).toBe(at(next) + 10);
+    });
+
+    it('新 feed 尚未有歷史時不從負無限掃描，也不以連線或 tick 代替暖身歷史', () => {
+        const feed = new LiveFeed('FUT');
+        feed.observe(1, null, day('10:00'));
+        feed.onTick({ time: day('10:00') + 10, price: 101, volume: 1 }, 1, day('10:00') + 11);
+        expect(feed.snapshot(day('10:00') + 20)).toMatchObject({ asOf: -Infinity, live: null, pendingFrom: null, historyWantedAt: null });
     });
 
     it('共用快取的舊歷史：請求時刻到串流起點之間的分鐘要等補抓', () => {

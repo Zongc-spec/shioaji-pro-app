@@ -128,11 +128,15 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         const sign = trade.direction === 'LONG' ? 1 : -1;
         const n = Math.min(qty, trade.openQty);
         const pv = trade.plan.pointValue;
+        const previouslyClosedQty = trade.qty - trade.openQty;
         trade.fills.push({ time: t, at, price, qty: n, reason });
         trade.openQty -= n;
         const points = sign * (price - trade.fillPrice) * n;
         trade.realizedPoints += points;
-        const cost = 2 * cfg.feePerSide * n + futuresTax(trade.fillPrice, pv, inp.taxRate, n) + futuresTax(price, pv, inp.taxRate, n);
+        // 進場稅以累計平倉口數分攤，確保分批加總等於整筆進場口數取整的稅額。
+        const entryTax = futuresTax(trade.fillPrice, pv, inp.taxRate, previouslyClosedQty + n) -
+            futuresTax(trade.fillPrice, pv, inp.taxRate, previouslyClosedQty);
+        const cost = 2 * cfg.feePerSide * n + entryTax + futuresTax(price, pv, inp.taxRate, n);
         trade.costNtd += cost;
         trade.realizedNtd += points * pv - cost;
         log(at === 'open' ? t - 60 : t, 'EXIT', trade.id, `${exitText(reason)} ${n} 口 @ ${price}（${fillWhen(t, at)}）`);

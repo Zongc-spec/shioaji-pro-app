@@ -52,5 +52,12 @@ export default defineConfig({
         __SHIOAJI_BUILD_VERSION__: JSON.stringify('demo'),
         __SHIOAJI_SERVER_VERSION__: JSON.stringify('demo'),
     },
-    server: { fs: { allow: [root] } },
+    server: {
+        host: '127.0.0.1',
+        port: 5298,
+        strictPort: true,
+        fs: { allow: [root] },
+        // Keep the visual fixture in-browser isolated from the app and sidecar.
+        headers: { 'Content-Security-Policy': "connect-src 'self'" },
+    },
 });

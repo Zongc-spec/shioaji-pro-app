@@ -7,8 +7,9 @@ import type { EntryMode, EntryParams, NoteParams, RiskConfig, TrendAlgoId, Trend
 export const TSP_TYPE = 'trend-signal-pro';
 /** 計算規則版本：改動任何訊號／進場／風控規則都要升版，舊 ID 才不會混淆。
  *  1.1.0：TrendCore 四態（含 NEUTRAL）與 Donchian＋ATR、整段趨勢的多次 1m 提示（V1.1）
- *  1.1.1：缺分鐘的 5m 不參與計算、5m 桶內缺分鐘後的 1m 不提示、即時資料以涵蓋判定已收並凍結（審查 P1 修正） */
-export const TSP_ALGO_VERSION = 'tsp-1.1.1';
+ *  1.1.1：缺分鐘的 5m 不參與計算、5m 桶內缺分鐘後的 1m 不提示、即時資料以涵蓋判定已收並凍結
+ *  1.1.2：停用重啟重設接收涵蓋、心跳不推進資料確認、補抓回應順序與多口進場稅分配修正 */
+export const TSP_ALGO_VERSION = 'tsp-1.1.2';
 
 /** V1 交易權限：只觀察。啟用任何發單能力需另行授權（規格 §0.5） */
 export const TSP_PERMISSIONS = {

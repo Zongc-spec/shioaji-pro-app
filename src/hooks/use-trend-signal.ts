@@ -1,12 +1,12 @@
 // src/hooks/use-trend-signal.ts — Trend Signal Pro 的資料來源：固定 20 天的 1m 歷史
 // （chart-history 快取，與主圖同一條 kbars 路徑）＋ SSE 逐筆成交組即時 1m。
-// 「已收」由 core/feed.ts 依資料涵蓋判定（伺服器歷史的原始請求時刻、同一次連線的成交與心跳），
+// 「已收」由 core/feed.ts 依資料涵蓋判定（伺服器歷史的原始請求時刻、連續接收期間的交易所成交時間），
 // 不靠牆鐘；斷線重連或缺分鐘時先補抓近兩天的歷史，涵蓋後才確認。已確認的分鐘凍結，
 // 晚到的成交與「更新歷史」都不改寫。只讀行情，不碰任何下單路徑。
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { fetchChartHistoryStamped, nextChartHistoryRevision } from '../lib/chart-history';
-import { getLastHeartbeat, getStreamStatus, onAnyTick, streamConnectionEpoch, subscribeStatusStore, type StreamStatus } from '../lib/stream';
+import { getStreamStatus, onAnyTick, streamConnectionEpoch, subscribeStatusStore, type StreamStatus } from '../lib/stream';
 import { configFromParams } from '../lib/trend-signal/config';
 import { LiveFeed } from '../lib/trend-signal/core/feed';
 import { runTrendSignal } from '../lib/trend-signal/engine';
@@ -110,15 +110,23 @@ export function useTrendSignal(
 
     useEffect(() => {
         if (!enabled) return;
-        return onAnyTick((tick) => {
+        const feed = getFeed();
+        feed.observe(streamConnectionEpoch(), null, nowWallClockUtc());
+        const unsubscribe = onAnyTick((tick) => {
             if (tick.code !== code || tick.simtrade || tick.intraday_odd) return;
             const time = wallClockToUtc(`${tick.date}T${tick.time}`);
             const price = Number(tick.close);
             if (!Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
-            getFeed().onTick({ time, price, volume: tick.volume }, streamConnectionEpoch(), nowWallClockUtc());
+            feed.onTick({ time, price, volume: tick.volume }, streamConnectionEpoch(), nowWallClockUtc());
             lastPriceRef.current = price;
             tickSeqRef.current += 1;
         });
+        return () => {
+            unsubscribe();
+            feed.pause();
+            // 接收生命週期結束後，舊補抓不再有寫入或釋放新請求的權限。
+            patchRef.current = { inFlight: false, at: 0 };
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [code, enabled]);
 
@@ -128,18 +136,22 @@ export function useTrendSignal(
         const compute = () => {
             const feed = getFeed();
             const now = nowWallClockUtc();
-            const hb = getLastHeartbeat();
-            feed.observe(streamConnectionEpoch(), hb > 0 ? msToWallClockUtc(hb) : null, now);
+            feed.observe(streamConnectionEpoch(), null, now);
             const s = feed.snapshot(now);
+            if (!Number.isFinite(s.asOf)) return;
             // 有分鐘等資料補齊：補抓近兩天的歷史（節流；失敗下一輪再試）
             const patch = patchRef.current;
             if (s.historyWantedAt !== null && now >= s.historyWantedAt && !patch.inFlight && Date.now() - patch.at >= PATCH_MIN_INTERVAL_MS) {
-                patchRef.current = { inFlight: true, at: Date.now() };
+                const request = { inFlight: true, at: Date.now() };
+                patchRef.current = request;
                 fetchChartHistoryStamped(contract, dateStrOffset(1), dateStrOffset(0), { revision: nextChartHistoryRevision(), timeoutMs: 30_000 })
-                    .then(({ kbars, requestedAt }) => feed.setHistory(kbarsToCandles(kbars), msToWallClockUtc(requestedAt), true))
+                    .then(({ kbars, requestedAt }) => {
+                        // 同商品的 historyVer／參數重算不會取消仍有效的補抓；停用或換商品才撤銷 record。
+                        if (patchRef.current === request) feed.setHistory(kbarsToCandles(kbars), msToWallClockUtc(requestedAt), true);
+                    })
                     .catch(() => undefined)
                     .finally(() => {
-                        patchRef.current = { ...patchRef.current, inFlight: false };
+                        if (patchRef.current === request) patchRef.current = { ...request, inFlight: false };
                     });
             }
             const nextInfo: FeedInfo = { pendingFrom: s.pendingFrom, confirmLagSec: Math.max(0, now - s.asOf), lateTicks: s.lateTicks };
@@ -180,7 +192,9 @@ export function useTrendSignal(
         };
         compute();
         const id = setInterval(compute, 1000);
-        return () => clearInterval(id);
+        return () => {
+            clearInterval(id);
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enabled, historyVer, config, contract, code, paramsKey]);
 

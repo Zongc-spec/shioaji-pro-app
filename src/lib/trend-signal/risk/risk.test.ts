@@ -278,6 +278,37 @@ describe('虛擬部位', () => {
         expect(hit.costNtd).toBe(24 + 17);
         expect(hit.realizedNtd).toBe(hit.realizedPoints * 10 - hit.costNtd);
     });
+    it('2 口分批出場：逐筆成本分配的進場稅總和等於整筆口數取整結果', () => {
+        const taxRate = 0.00002;
+        const entryPrice = 23410;
+        const m1 = scenario([[100, 165, 100, 160], [160, 165, 100, 110]])
+            .map((c) => ({ ...c, open: c.open + 23310, high: c.high + 23310, low: c.low + 23310, close: c.close + 23310 }));
+        const vt = run(m1, [BUY], [entry(BUY)], {
+            cfg: { qty: 2, slipTicks: 0, budget: 100000 },
+            taxRate,
+        }).trades[0]!;
+
+        expect(vt.fillPrice).toBe(entryPrice);
+        expect(vt.status).toBe('CLOSED');
+        expect(vt.fills.map((f) => f.qty)).toEqual([1, 1]);
+
+        let closedQty = 0;
+        const entryTaxesByFill: number[] = [];
+        const perFillCosts = vt.fills.map((fill) => {
+            const previousEntryTax = futuresTax(entryPrice, 10, taxRate, closedQty);
+            closedQty += fill.qty;
+            const allocatedEntryTax = futuresTax(entryPrice, 10, taxRate, closedQty) - previousEntryTax;
+            entryTaxesByFill.push(allocatedEntryTax);
+            return 2 * R.feePerSide * fill.qty + allocatedEntryTax + futuresTax(fill.price, 10, taxRate, fill.qty);
+        });
+        expect(entryTaxesByFill).toEqual([5, 4]);
+        const expectedCost =
+            2 * R.feePerSide * 2 + futuresTax(entryPrice, 10, taxRate, 2) +
+            vt.fills.reduce((sum, fill) => sum + futuresTax(fill.price, 10, taxRate, fill.qty), 0);
+        expect(perFillCosts.reduce((sum, cost) => sum + cost, 0)).toBe(expectedCost);
+        expect(vt.costNtd).toBe(expectedCost);
+        expect(vt.realizedNtd).toBe(vt.realizedPoints * 10 - expectedCost);
+    });
     it('5m 趨勢失效（→ NEUTRAL）→ 下一根 1m 開盤平倉，不等 1m', () => {
         const m1 = scenario([[100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [100, 105, 95, 100], [98, 105, 95, 100]]);
         const inv: TrendInvalidation = { id: 'inv-8', barTime: t0 + 2700, index: 8, from: 'LONG' };
