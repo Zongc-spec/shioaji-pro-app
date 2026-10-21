@@ -9,8 +9,9 @@ export const TSP_TYPE = 'trend-signal-pro';
  *  1.1.0：TrendCore 四態（含 NEUTRAL）與 Donchian＋ATR、整段趨勢的多次 1m 提示（V1.1）
  *  1.1.1：缺分鐘的 5m 不參與計算、5m 桶內缺分鐘後的 1m 不提示、即時資料以涵蓋判定已收並凍結
  *  1.1.2：停用重啟重設接收涵蓋、心跳不推進資料確認、補抓回應順序與多口進場稅分配修正
- *  1.1.3：虛擬進場的下一分鐘缺棒時取消，不延後到下一根現存 K 棒 */
-export const TSP_ALGO_VERSION = 'tsp-1.1.3';
+ *  1.1.3：虛擬進場的下一分鐘缺棒時取消，不延後到下一根現存 K 棒
+ *  1.2.0：初始停損預設改依 5m 擺動點與 5m ATR（stopTf=5；1 為原規則）、每筆預算預設 NT$2,500（使用者決定，研究結果 7） */
+export const TSP_ALGO_VERSION = 'tsp-1.2.0';
 
 /** V1 交易權限：只觀察。啟用任何發單能力需另行授權（規格 §0.5） */
 export const TSP_PERMISSIONS = {
@@ -43,18 +44,18 @@ export const TSP_PARAMS: ParamDef[] = [
     { key: 'pivotLeft', label: '進場｜結構轉折左側 K 棒', def: 2, min: 1, max: 10 },
     { key: 'pivotRight', label: '進場｜結構轉折右側確認 K 棒', def: 2, min: 1, max: 10 },
     { key: 'minPullbackAtr', label: '進場｜最小回檔（× 1m ATR14）', def: 0.5, min: 0, max: 5, step: 0.05 },
-    { key: 'budget', label: '風控｜每筆風險預算 NT$', def: 1000, min: 100, max: 1000000, step: 100 },
+    { key: 'budget', label: '風控｜每筆風險預算 NT$', def: 2500, min: 100, max: 1000000, step: 100 },
     { key: 'feePerSide', label: '風控｜單邊手續費 NT$/口', def: 12, min: 0, max: 1000 },
     { key: 'slipTicks', label: '風控｜滑價緩衝（tick/邊）', def: 1, min: 0, max: 20 },
     { key: 'qty', label: '風控｜計畫口數上限', def: 1, min: 1, max: 50 },
-    { key: 'swingBars', label: '風控｜擺動高低點 K 棒數（1m）', def: 5, min: 3, max: 30 },
-    { key: 'stopAtr', label: '風控｜初始停損 ATR 倍數（1m）', def: 1.5, min: 0.5, max: 5, step: 0.1 },
+    { key: 'stopTf', label: '風控｜初始停損週期（5 主趨勢 5m／1 進場 1m 的擺動點與 ATR）', def: 5, min: 1, max: 5, step: 4 },
+    { key: 'swingBars', label: '風控｜擺動高低點 K 棒數（停損週期）', def: 5, min: 3, max: 30 },
+    { key: 'stopAtr', label: '風控｜初始停損 ATR 倍數（停損週期 ATR14）', def: 1.5, min: 0.5, max: 5, step: 0.1 },
     { key: 'trailAtr', label: '風控｜移動停損 ATR 倍數（5m）', def: 1.2, min: 0.5, max: 5, step: 0.1 },
     { key: 'singleExit', label: '風控｜單口出場（1 追蹤／2 2R／3 3R）', def: 1, min: 1, max: 3 },
     { key: 'tierMode', label: '風控｜多口分配（0 規格表／1 自訂）', def: 0, min: 0, max: 1 },
     { key: 'tp2Lots', label: '風控｜自訂 2R 停利口數', def: 1, min: 0, max: 50 },
     { key: 'tp3Lots', label: '風控｜自訂 3R 停利口數', def: 1, min: 0, max: 50 },
-    { key: 'riskModel', label: '風控｜模型（0 1m 停損＋保本／1 5m 停損＋保本／2 5m 停損＋進場即移動停損）', def: 0, min: 0, max: 2 },
 ];
 
 /** legend 只顯示趨勢核心參數 */
@@ -95,7 +96,6 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
         minPullbackAtr: param(p, 'minPullbackAtr'),
     };
     const singleExit = int(p, 'singleExit');
-    const riskModel = int(p, 'riskModel');
     const risk: RiskConfig = {
         budget: param(p, 'budget'),
         feePerSide: param(p, 'feePerSide'),
@@ -108,12 +108,19 @@ export function configFromParams(p: Record<string, number> = {}): TrendSignalCon
         tierMode: int(p, 'tierMode') >= 1 ? 'custom' : 'auto',
         tp2Lots: int(p, 'tp2Lots'),
         tp3Lots: int(p, 'tp3Lots'),
-        riskModel: riskModel === 2 ? 2 : riskModel === 1 ? 1 : 0,
+        stopTf: int(p, 'stopTf') === 1 ? 1 : 5,
     };
     return { trend, note, entry, risk };
 }
 
 export const DEFAULT_CONFIG: TrendSignalConfig = configFromParams(DEFAULTS);
+
+/** Web 指標實例會存下全部參數。tsp-1.2.0 之前存的實例沒有 stopTf：預算仍是舊預設 NT$1,000 的升到新預設，
+ *  使用者改過的預算保留；補上 stopTf 之後不再升級（之後再改回 1,000 也照用）。 */
+export function upgradeTspParams(p: Record<string, number>): Record<string, number> {
+    if (p.stopTf !== undefined) return p;
+    return { ...p, stopTf: 5, ...(p.budget === 1000 ? { budget: 2500 } : {}) };
+}
 
 /** 1m 微型趨勢：與 5m 同一個 TrendCore 演算法，只換各演算法的靈敏度參數（V1.1 §4）；
  *  其餘參數（ATR 週期、KAMA 週期、Donchian 追蹤帶倍數）沿用趨勢設定 */

@@ -15,8 +15,6 @@ import type { AuditEvent, TfSeries, TrendInvalidation, TrendSignal, TrendState }
 
 export const CHART_TSP_VERSION = 'tsp-chart-1.2.0';
 const DAY = 86400;
-const nameOf = (key: string) => key === '1m 微型提示' ? '本圖微型提示' : key === '1m 結構提示' ? '本圖結構提示' : key;
-export const CHART_TSP_PLOTS = CUSTOM_TSP_PLOTS.map(([key, color]) => [nameOf(key), color] as const);
 
 /** 宿主未傳 tf；預設由間距推斷，可用 chartTf 明訂分鐘數消除缺棒歧義。 */
 export function inferChartMinutes(times: number[], explicit = 0): number {
@@ -72,7 +70,7 @@ export function frameFromChart(bars: BarsInput, params: Record<string, number> =
         config: configFromParams(params) };
 }
 
-/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助、或進場模式需要 1m 時） */
+/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助） */
 export function runChartSignal(frame: ReturnType<typeof frameFromChart>, opts: { risk?: boolean } = {}) {
     const { series, config: cfg, asOf, label } = frame;
     const track = trendTrack(series, cfg.trend);
@@ -138,10 +136,10 @@ export function computeChartCustomTsp(bars: BarsInput, params: Record<string, nu
     const mappedTimes = bars.time.map(frame.mapTime);
     const projected = projectCustomTsp(result, mappedTimes, through, params.riskHistory === 1);
     keepLastChartSegment(projected, frame, result.t5.dir, mappedTimes);
-    const outputs = Object.fromEntries(Object.entries(projected).map(([k, v]) => [nameOf(k), v]));
+    const outputs = projected;
     const levelKeys = new Set(['初始停損', '目前停損', '保本價', '1R', '2R', '3R']);
-    const hints = Object.fromEntries(CHART_TSP_PLOTS.map(([key, color]) => [key, { color,
+    const hints = Object.fromEntries(CUSTOM_TSP_PLOTS.map(([key, color]) => [key, { color,
         kind: key.endsWith('趨勢線') ? 'line' : levelKeys.has(key) ? params.riskHistory === 1 ? 'points' : 'line' : 'points',
         width: key === '目前停損' || key.endsWith('趨勢線') ? 2 : 1 } satisfies PlotHint]));
-    return { frame, result, outputs, order: CHART_TSP_PLOTS.map(([key]) => key), hints };
+    return { frame, result, outputs, order: CUSTOM_TSP_PLOTS.map(([key]) => key), hints };
 }

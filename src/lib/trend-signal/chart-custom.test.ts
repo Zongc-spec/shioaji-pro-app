@@ -86,8 +86,9 @@ describe.each([1, 5, 15, 60, 1440])('本圖 %im 核心與輸出', (minutes) => {
         expect(computed.result.trades.length).toBeGreaterThan(0);
         expect(computed.outputs['初始停損']!.some((v) => v !== null)).toBe(true);
         expect(computed.order).toHaveLength(19);
-        expect(computed.order).toContain('本圖微型提示');
-        expect(computed.order).toContain('本圖結構提示');
+        // 提示輸出不帶週期字樣：1m 主圖是 1m 提示、5m 主圖是 5m 提示
+        expect(computed.order).toContain('微型提示');
+        expect(computed.order).toContain('結構提示');
         expect(computed.order).not.toContain('1m 微型提示');
         expect(computed.hints['多方趨勢線']?.kind).toBe('line');
         for (const key of LEVELS) expect(computed.hints[key]?.kind).toBe('points');

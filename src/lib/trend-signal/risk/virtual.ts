@@ -182,12 +182,12 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                 continue;
             }
             const idx = lastAtOrBefore(m1, bt);
-            // 風控模型 1／2：初始停損依主趨勢週期（5m）的結構與波動，0：依進場週期（1m）
-            const j5 = cfg.riskModel === 0 ? -1 : lastAtOrBefore(m5.bars, bt);
-            const swing = cfg.riskModel === 0
-                ? (idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : undefined)
-                : (j5 >= 1 ? swingPoint(m5.bars, j5, cfg.swingBars, e.direction) : undefined);
-            const a = cfg.riskModel === 0 ? (idx >= 0 ? atr1[idx] : undefined) : (j5 >= 0 ? atr5[j5] : undefined);
+            // 初始停損依 stopTf：5＝提示當下已收的主趨勢 5m 的結構與波動，1＝進場的 1m
+            const j5 = cfg.stopTf === 5 ? lastAtOrBefore(m5.bars, bt) : -1;
+            const swing = cfg.stopTf === 5
+                ? (j5 >= 1 ? swingPoint(m5.bars, j5, cfg.swingBars, e.direction) : undefined)
+                : (idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : undefined);
+            const a = cfg.stopTf === 5 ? (j5 >= 0 ? atr5[j5] : undefined) : (idx >= 0 ? atr1[idx] : undefined);
             const plan = planRisk({
                 direction: e.direction,
                 entry: e.refPrice,
@@ -278,8 +278,7 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
                         stop: plan.stop,
                         stopKind: 'initial',
                         stopHistory: [{ time: t, stop: plan.stop, reason: 'initial' }],
-                        // 模型 2：不等 +2R，進場後每根 5m 收棒就檢查移動停損
-                        trailing: cfg.riskModel === 2,
+                        trailing: false,
                         hit: { r1: null, r2: null, r3: null },
                         extreme: fill,
                         fills: [],
@@ -330,12 +329,8 @@ export function runVirtual(inp: VirtualInput): VirtualOutput {
         const p = vt.plan;
         if (vt.hit.r1 === null && reached(p.r1)) {
             vt.hit.r1 = t;
-            if (cfg.riskModel === 2) {
-                log(t, 'TARGET', vt.id, `+1R ${p.r1} 到價（風控模型 2 不移保本，停損跟隨 ${trendLabel} 移動）`);
-            } else {
-                log(t, 'TARGET', vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
-                queueStop(p.breakevenStop, 'breakeven');
-            }
+            log(t, 'TARGET', vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
+            queueStop(p.breakevenStop, 'breakeven');
         }
         if (vt.hit.r2 === null && reached(p.r2)) {
             vt.hit.r2 = t;

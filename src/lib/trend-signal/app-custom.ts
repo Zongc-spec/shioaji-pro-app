@@ -1,10 +1,10 @@
 // src/lib/trend-signal/app-custom.ts — 官方 App 自訂指標單檔的週期分派。原意：5m 是主趨勢並判斷進出場，
 // 1m 是精準進出場。App 只給主圖本身的 OHLCV，所以各主圖週期能做到的範圍不同：
 //   1m 主圖    原模型：由 1m 聚合 5m 主趨勢、1m 精準提示與虛擬風控（runTrendSignal，與 Web 逐根相同）
-//   5m 主圖    5m 主趨勢與 5m 收棒判斷的進出場（IMMEDIATE：下一根 5m 開盤就是下一根 1m 開盤，成交價相同）；
-//              沒有 1m 資料：不畫 1m 提示，停損與觸價以 5m K 棒近似；風控選了需要 1m 的進場模式時不畫虛擬部位
+//   5m 主圖    5m 主趨勢＋三種進場模式與虛擬風控，全部以 5m K 棒計算：IMMEDIATE 與 1m 主圖同一根成交、同一個初始停損；
+//              MICRO_TREND／PRICE_STRUCTURE 的提示來自 5m K 棒（看不到 5 分鐘內的回檔），停損與觸價以 5m K 棒判定
 //   其他週期   拿不到 5m 主趨勢：只畫該週期自己的趨勢線作高週期輔助，不產生訊號、進出場與風控
-// 三種主圖輸出同一組 19 條（App 存檔時固定輸出清單，與 1.1.3 單檔同名），算不出的序列為空。
+// 三種主圖輸出同一組 19 條（App 存檔時依輸出名稱保留樣式），算不出的序列為空。
 
 import type { BarsInput, PlotHint } from '../custom-runtime';
 import { nowWallClockUtc } from '../utils/kbars';
@@ -14,13 +14,16 @@ import { tradingSessionOf } from './core/session';
 import { runTrendSignal } from './engine';
 import type { TrendSignalResult } from './types';
 
-export const APP_TSP_VERSION = 'tsp-app-1.3.0';
+export const APP_TSP_VERSION = 'tsp-app-1.4.0';
 export type AppTspMode = 'model' | 'm5' | 'aux';
 export const APP_TSP_PLOTS = CUSTOM_TSP_PLOTS;
 
 type Outputs = Record<string, (number | null)[]>;
 const LEVELS = new Set(['初始停損', '目前停損', '保本價', '1R', '2R', '3R']);
 const empty = (n: number): Outputs => Object.fromEntries(APP_TSP_PLOTS.map(([k]) => [k, new Array<number | null>(n).fill(null)]));
+/** 5m 主圖的微型趨勢與主趨勢算在同一組 5m K 棒上：沿用 1m 主圖的預設會與主趨勢完全相同、MICRO_TREND 永遠不提示。
+ *  改用較靈敏的預設（只依提示頻率選定，研究結果 7.3）；使用者在 App 宣告了該參數就照用 */
+export const M5_MICRO_DEFAULTS = { microStMult: 1, microDcLength: 5, microKamaHyst: 0.05 } as const;
 
 /** 主圖週期 → 計算方式 */
 export function appModeOf(minutes: number): AppTspMode {
@@ -61,10 +64,10 @@ export function computeAppCustomTsp(bars: BarsInput, params: Record<string, numb
         }
         result = res;
     } else {
-        const frame = frameFromChart(bars, params, nowWall);
-        // 5m：只有 5m 收棒立即進場（IMMEDIATE）不需要 1m；其他週期不建立部位
-        const res = runChartSignal(frame, { risk: mode === 'm5' && frame.config.entry.mode === 'IMMEDIATE' });
-        const shown = mode === 'm5' ? { ...res, entries: [] } : { ...res, signals: [], invalidations: [], entries: [], trades: [] };
+        const frame = frameFromChart(bars, mode === 'm5' ? { ...M5_MICRO_DEFAULTS, ...params } : params, nowWall);
+        // 其他週期拿不到 5m 主趨勢：不建立部位
+        const res = runChartSignal(frame, { risk: mode === 'm5' });
+        const shown = mode === 'm5' ? res : { ...res, signals: [], invalidations: [], entries: [], trades: [] };
         const mapped = bars.time.map(frame.mapTime);
         outputs = projectCustomTsp(shown, mapped, frame.live?.time ?? frame.confirmed.at(-1)?.time ?? -Infinity, riskHistory);
         keepLastChartSegment(outputs, frame, res.t5.dir, mapped);

@@ -16,7 +16,7 @@ export const CUSTOM_TSP_PROFILE = { tick: 1, pointValue: 10, taxRate: 0.00002 } 
 export const CUSTOM_TSP_PLOTS = [
     ['多方趨勢線', '#1fd286'], ['空方趨勢線', '#ff4d6a'],
     ['BUY', '#00e5ff'], ['SELL', '#ff2bd6'], ['失效', '#e0a43c'],
-    ['1m 微型提示', '#8fd3ff'], ['1m 結構提示', '#b06fff'],
+    ['微型提示', '#8fd3ff'], ['結構提示', '#b06fff'],
     ['初始停損', '#ff4d6a'], ['目前停損', '#ffad33'], ['保本價', '#d0d8e8'],
     ['1R', '#7fbf9f'], ['2R', '#4fc9a5'], ['3R', '#1fd286'],
     ['虛擬進場多', '#00e5ff'], ['虛擬進場空', '#ff2bd6'],
@@ -96,8 +96,8 @@ export function projectCustomTsp(res: CustomPlotResult, chartTimes: number[], vi
     for (const s of res.signals) put(s.kind, s.barTime, s.close);
     for (const x of res.invalidations) put('失效', x.barTime, res.m5.bars[x.index]!.close);
     for (const e of res.entries) {
-        if (e.mode === 'MICRO_TREND') put('1m 微型提示', e.barTime, e.refPrice);
-        if (e.mode === 'PRICE_STRUCTURE') put('1m 結構提示', e.barTime, e.refPrice);
+        if (e.mode === 'MICRO_TREND') put('微型提示', e.barTime, e.refPrice);
+        if (e.mode === 'PRICE_STRUCTURE') put('結構提示', e.barTime, e.refPrice);
     }
     const times = [...indexes.keys()].sort((a, b) => a - b);
     for (const trade of res.trades) {

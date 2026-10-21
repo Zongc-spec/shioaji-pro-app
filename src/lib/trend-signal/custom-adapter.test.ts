@@ -12,7 +12,7 @@ import { runVirtual } from './risk/virtual';
 import type { EntryEvent, TrendSignal, TrendSignalResult, VirtualTrade } from './types';
 
 const KEYS = [
-    '多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示',
+    '多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '微型提示', '結構提示',
     '初始停損', '目前停損', '保本價', '1R', '2R', '3R', '虛擬進場多', '虛擬進場空',
     '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場',
 ];
@@ -283,7 +283,8 @@ describe('未收棒虛擬風控因果', () => {
             m1, asOf, live, m1SessionEnd: buildTf(m1, 1, 'FUT', asOf).sessionEnd, m5,
             t5: { tf: 5, algo: 'supertrend', line: m5.bars.map(() => undefined), dir: m5.bars.map(() => 'LONG'), stopLine: true },
             signals: [signal], invalidations: [], entries: [entry],
-            cfg: { ...DEFAULT_CONFIG.risk, budget: 100000, qty: 3 }, tick: 1, pointValue: 10, taxRate: 0.00002, key: 'test-live',
+            // 40 根 1m 只有 8 根 5m，5m ATR14 尚未暖身：用 1m 停損，這裡測的是未收棒的因果
+            cfg: { ...DEFAULT_CONFIG.risk, stopTf: 1, budget: 100000, qty: 3 }, tick: 1, pointValue: 10, taxRate: 0.00002, key: 'test-live',
         });
         const target = run(bar(asOf + 60, 100, 250, 95, 240)).trades[0]!;
         expect(target.fillPrice).toBe(101);

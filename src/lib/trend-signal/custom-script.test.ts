@@ -1,7 +1,8 @@
 // src/lib/trend-signal/custom-script.test.ts — App 真執行器跑產出的單檔（docs/trend-signal-pro-custom.js），
 // 依主圖週期驗證原意「5m 是主趨勢並判斷進出場，1m 是精準進出場」：
 //   1m 主圖：原模型，與 Web 的 runTrendSignal 逐值相同（三核心 × 三進場模式）
-//   5m 主圖：與 1m 主圖同一組 5m 訊號；不畫 1m 提示；IMMEDIATE 進場時刻與成交價和 1m 主圖相同
+//   5m 主圖：與 1m 主圖同一組 5m 訊號；三核心 × 三進場模式都有 5m 提示與虛擬部位；
+//            IMMEDIATE 和 1m 主圖同一根成交、同價、同一個初始停損；未宣告微型參數時用 5m 預設
 //   15m／60m／日K：只有該週期的趨勢線（高週期輔助），沒有訊號、提示、進出場與風控
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -10,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCustom, type BarsInput, type CustomRunResult } from '../custom-runtime';
 import type { Candle } from '../types/market';
 import { aggregate } from '../utils/kbars';
-import { computeAppCustomTsp } from './app-custom';
+import { computeAppCustomTsp, M5_MICRO_DEFAULTS } from './app-custom';
 import { frameFromChart } from './chart-custom';
 import { configFromParams } from './config';
 import { projectCustomTsp } from './custom-adapter';
@@ -22,12 +23,11 @@ import type { TrendSignalResult } from './types';
 
 const SOURCE = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/trend-signal-pro-custom.js'), 'utf8');
 const DAY = 86400;
-const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '1m 微型提示', '1m 結構提示',
+const KEYS = ['多方趨勢線', '空方趨勢線', 'BUY', 'SELL', '失效', '微型提示', '結構提示',
     '初始停損', '目前停損', '保本價', '1R', '2R', '3R', '虛擬進場多', '虛擬進場空',
     '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
 const TREND = ['多方趨勢線', '空方趨勢線'];
 const LEVELS = ['初始停損', '目前停損', '保本價', '1R', '2R', '3R'];
-const TRADE = [...LEVELS, '虛擬進場多', '虛擬進場空', '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
 const ALGOS = [0, 1, 2];
 
 const toInput = (bars: Candle[]): BarsInput => ({
@@ -78,8 +78,8 @@ describe('1m 主圖：原模型（5m 主趨勢＋1m 精準進出場），與 Web
         const at = (ts: number[]) => ts.map((t) => times.indexOf(t)).sort((a, b) => a - b);
         expect(marked(app.outputs.BUY!)).toEqual(at(res.signals.filter((s) => s.kind === 'BUY').map((s) => s.barTime)));
         expect(marked(app.outputs.SELL!)).toEqual(at(res.signals.filter((s) => s.kind === 'SELL').map((s) => s.barTime)));
-        expect(marked(app.outputs['1m 微型提示']!)).toEqual(at(res.entries.filter((e) => e.mode === 'MICRO_TREND').map((e) => e.barTime)));
-        expect(marked(app.outputs['1m 結構提示']!)).toEqual(at(res.entries.filter((e) => e.mode === 'PRICE_STRUCTURE').map((e) => e.barTime)));
+        expect(marked(app.outputs['微型提示']!)).toEqual(at(res.entries.filter((e) => e.mode === 'MICRO_TREND').map((e) => e.barTime)));
+        expect(marked(app.outputs['結構提示']!)).toEqual(at(res.entries.filter((e) => e.mode === 'PRICE_STRUCTURE').map((e) => e.barTime)));
         for (const trade of res.trades) {
             const i = times.indexOf(trade.fillTime);
             expect(app.outputs[trade.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空']![i]).toBe(trade.fillPrice);
@@ -98,23 +98,30 @@ describe('1m 主圖：原模型（5m 主趨勢＋1m 精準進出場），與 Web
     });
 });
 
-describe('5m 主圖：同一組 5m 主趨勢判斷進出場；沒有 1m，不畫 1m 提示', () => {
+describe('5m 主圖：同一組 5m 主趨勢；三核心 × 三進場模式的提示與虛擬部位都以 5m K 棒計算', () => {
+    const MODES = ['IMMEDIATE', 'MICRO_TREND', 'PRICE_STRUCTURE'] as const;
+    const times5 = chart5.map((b) => b.time);
+    const at5 = (ts: number[]) => ts.map((t) => times5.indexOf(t)).sort((a, b) => a - b);
+    const app5 = (params: Record<string, number>) => {
+        setNow(closedAt);
+        const app = computeAppCustomTsp(toInput(chart5), params, closedAt);
+        expect(app.mode).toBe('m5');
+        return { app, res: app.result as Exclude<typeof app.result, TrendSignalResult | null> };
+    };
+
     it.each(ALGOS)('核心 %i：BUY／SELL／失效與 1m 主圖相同，趨勢線是同一條 5m 線', (algo) => {
         const res = web({ algo });
         expect(chart5).toEqual(res.m5.bars);
         const app = script(chart5, { algo }, closedAt);
-        const times = chart5.map((b) => b.time);
         const put = (ts: { barTime: number; v: number }[]) => {
-            const out = nulls(times.length);
-            for (const x of ts) out[times.indexOf(x.barTime)] = x.v;
+            const out = nulls(times5.length);
+            for (const x of ts) out[times5.indexOf(x.barTime)] = x.v;
             return out;
         };
         expect(app.outputs.BUY).toEqual(put(res.signals.filter((s) => s.kind === 'BUY').map((s) => ({ barTime: s.barTime, v: s.close }))));
         expect(app.outputs.SELL).toEqual(put(res.signals.filter((s) => s.kind === 'SELL').map((s) => ({ barTime: s.barTime, v: s.close }))));
         expect(app.outputs['失效']).toEqual(put(res.invalidations.map((x) => ({ barTime: x.barTime, v: chart5[x.index]!.close }))));
-        expect(app.outputs['1m 微型提示']).toEqual(nulls(times.length));
-        expect(app.outputs['1m 結構提示']).toEqual(nulls(times.length));
-        const start = lastSegmentStart(times, res.t5.dir, res.m5.session, 300);
+        const start = lastSegmentStart(times5, res.t5.dir, res.m5.session, 300);
         chart5.forEach((_, k) => {
             const show = k >= start;
             expect(app.outputs['多方趨勢線']![k]).toBe(show && res.t5.dir[k] === 'LONG' ? res.t5.line[k]! : null);
@@ -122,25 +129,50 @@ describe('5m 主圖：同一組 5m 主趨勢判斷進出場；沒有 1m，不畫
         });
     });
 
-    it.each(ALGOS)('核心 %i：IMMEDIATE 的第一筆虛擬進場時刻與成交價和 1m 主圖相同（下一根 5m 開盤＝下一根 1m 開盤）', (algo) => {
+    it.each(ALGOS)('核心 %i：IMMEDIATE 的第一筆虛擬部位和 1m 主圖同一根成交、同價、同一個初始停損與 R（都依已收的 5m）', (algo) => {
         const params = { algo, budget: 100000, qty: 1 };
         const first1m = web(params).trades[0]!;
-        setNow(closedAt);
-        const app5 = computeAppCustomTsp(toInput(chart5), params, closedAt);
-        expect(app5.mode).toBe('m5');
-        const first5m = app5.result!.trades[0]!;
+        const { app, res } = app5(params);
+        const first5m = res.trades[0]!;
         expect(first5m.signalId.endsWith(`|${first1m.signalTime}|${first1m.direction === 'LONG' ? 'BUY' : 'SELL'}`)).toBe(true);
         expect(first5m.fillAt).toBe(first1m.fillAt);
         expect(first5m.fillPrice).toBe(first1m.fillPrice);
+        const plan = (p: typeof first1m.plan) => [p.stop, p.stopBasis, p.riskPoints, p.r1, p.r2, p.r3, p.breakevenStop];
+        expect(plan(first5m.plan)).toEqual(plan(first1m.plan));
         // 單檔輸出與直接呼叫相同
-        expect(script(chart5, params, closedAt).outputs).toEqual(app5.outputs);
+        expect(script(chart5, params, closedAt).outputs).toEqual(app.outputs);
     });
 
-    it('風控選了需要 1m 的進場模式：5m 主圖不畫虛擬部位（避免顯示另一組部位）', () => {
-        for (const entryMode of [1, 2, 3]) {
-            const app = script(chart5, { entryMode, budget: 100000 }, closedAt);
-            for (const key of TRADE) expect(app.outputs[key]).toEqual(nulls(chart5.length));
-            expect(marked(app.outputs.BUY!).length).toBeGreaterThan(0);
+    it.each(ALGOS.flatMap((algo) => [0, 1, 2].map((entryMode) => [algo, entryMode] as const)))('核心 %i／進場 %i：有該模式的虛擬部位，在提示的下一根 5m 開盤成交；圖上的提示點就是提示事件', (algo, entryMode) => {
+        const params = { algo, entryMode, budget: 100000, qty: 1, riskHistory: 1 };
+        const { res } = app5(params);
+        expect(res.entries.some((e) => e.mode === 'MICRO_TREND')).toBe(true);
+        expect(res.entries.some((e) => e.mode === 'PRICE_STRUCTURE')).toBe(true);
+        expect(res.trades.length).toBeGreaterThan(0);
+        for (const t of res.trades) {
+            expect(t.entryMode).toBe(MODES[entryMode]);
+            const hint = res.entries.find((e) => e.id === t.entryId)!;
+            expect(t.fillAt).toBe(hint.barTime);
+            expect(t.fillTime).toBe(hint.barTime + 300);
+            expect(t.fillPrice).toBe(chart5[times5.indexOf(t.fillTime)]!.open + (t.direction === 'LONG' ? 1 : -1));
+        }
+        const out = script(chart5, params, closedAt).outputs;
+        expect(marked(out['微型提示']!)).toEqual(at5(res.entries.filter((e) => e.mode === 'MICRO_TREND').map((e) => e.barTime)));
+        expect(marked(out['結構提示']!)).toEqual(at5(res.entries.filter((e) => e.mode === 'PRICE_STRUCTURE').map((e) => e.barTime)));
+        for (const t of res.trades) {
+            expect(out[t.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空']![times5.indexOf(t.fillTime)]).toBe(t.fillPrice);
+            expect(out['初始停損']![times5.indexOf(t.fillTime)]).toBe(t.plan.stop);
+        }
+    });
+
+    it('微型參數：未宣告時用 5m 預設；宣告了就照用（與主趨勢相同的值會讓微型趨勢等於主趨勢，不再有微型提示）', () => {
+        const micro = (params: Record<string, number>) => app5(params).res.entries.filter((e) => e.mode === 'MICRO_TREND');
+        const same = { 0: { microStMult: 3 }, 1: { microDcLength: 20 }, 2: { microKamaHyst: 0.3 } } as const;
+        for (const algo of ALGOS) {
+            const auto = micro({ algo });
+            expect(auto.length).toBeGreaterThan(0);
+            expect(micro({ algo, ...M5_MICRO_DEFAULTS })).toEqual(auto);
+            expect(micro({ algo, ...same[algo as 0 | 1 | 2] })).toEqual([]);
         }
     });
 });

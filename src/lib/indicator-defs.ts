@@ -27,7 +27,7 @@ import {
     wma,
     type IndicatorPoint,
 } from './indicators';
-import { configFromParams, configKey, TREND_ALGOS, TSP_PARAMS, TSP_TYPE } from './trend-signal/config';
+import { configFromParams, configKey, TREND_ALGOS, TSP_PARAMS, TSP_TYPE, upgradeTspParams } from './trend-signal/config';
 import { projectLines, standaloneLines } from './trend-signal/project';
 import type { TrendSignalResult } from './trend-signal/types';
 import type { Candle } from './types/market';
@@ -533,10 +533,11 @@ export function newInstance(type: string): IndicatorInstance {
     const params: Record<string, number> = {};
     for (const p of def?.params ?? []) params[p.key] = p.def;
     const saved = loadTypeDefaults()[type];
+    const savedParams = saved?.params && type === TSP_TYPE ? upgradeTspParams(saved.params) : saved?.params;
     return {
         id: `${type}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         type,
-        params: { ...params, ...saved?.params },
+        params: { ...params, ...savedParams },
         colors: {},
         ...(saved?.styles ? { styles: saved.styles } : {}),
         ...(saved?.precision !== undefined
@@ -651,7 +652,9 @@ export function loadInstances(): IndicatorInstance[] {
         const raw = localStorage.getItem(STORE_KEY);
         if (raw) {
             const list = JSON.parse(raw) as IndicatorInstance[];
-            return list.filter((i) => DEF_BY_TYPE.has(i.type));
+            return list
+                .filter((i) => DEF_BY_TYPE.has(i.type))
+                .map((i) => (i.type === TSP_TYPE ? { ...i, params: upgradeTspParams(i.params) } : i));
         }
     } catch {
         // fresh start below

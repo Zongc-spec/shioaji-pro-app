@@ -23,7 +23,9 @@ describe('模擬警示去重', () => {
         expect(fresh.every(({ event }) => ['SIGNAL', 'INVALID', 'ENTRY', 'FILL', 'EXIT'].includes(event.kind))).toBe(true);
     });
     it('已提醒過的 key 不再提醒（重開、重算、換週期都一樣）', () => {
-        const withRecent = { ...res, asOf: res.events.at(-1)!.time + 60 };
+        // 以最後一個會提醒的事件定 asOf（持倉中的移動停損等事件不提醒）
+        const last = res.events.filter((e) => ['SIGNAL', 'INVALID', 'ENTRY', 'FILL', 'EXIT'].includes(e.kind)).at(-1)!;
+        const withRecent = { ...res, asOf: last.time + 60 };
         const first = pendingAlerts(withRecent, new Set());
         expect(first.length).toBeGreaterThan(0);
         expect(pendingAlerts(withRecent, new Set(first.map((x) => x.key)))).toEqual([]);
@@ -33,7 +35,7 @@ describe('模擬警示去重', () => {
 describe('審計匯出', () => {
     it('包含計算版本、演算法與參數、唯讀權限、資料來源與所有紀錄', () => {
         const out = auditExport(res, DEFAULT_CONFIG);
-        expect(out.version).toBe('tsp-1.1.3');
+        expect(out.version).toBe('tsp-1.2.0');
         expect(out.configKey).toBe(res.configKey);
         expect(out.algorithm).toBe('SuperTrend ATR 10 × 3');
         expect(out.permissions).toEqual({ read_only: true, auto_entry: false, auto_exit: false });

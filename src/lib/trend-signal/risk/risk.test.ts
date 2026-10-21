@@ -1,4 +1,4 @@
-// src/lib/trend-signal/risk/risk.test.ts — 虛擬風控：停損依據、R 在成交後固定、tick 取整、
+// src/lib/trend-signal/risk/risk.test.ts — 虛擬風控：停損依據與週期（1m／5m）、R 在成交後固定、tick 取整、
 // 新臺幣預算與口數（TMF／MTX 每點價值不同）、期交稅、整數口數分層、移動停損只往有利方向，
 // 以及虛擬部位的成交、停損優先、保本、分批停利、5m 反向／失效立即出場、不跨盤、
 // 同段趨勢多次提示（持倉時略過、停損後可再進場）。
@@ -6,13 +6,15 @@ import { describe, expect, it } from 'vitest';
 import { atr } from '../../indicators';
 import type { Candle } from '../../types/market';
 import { alignPoints, buildTf } from '../core/bars';
-import { DEFAULT_CONFIG } from '../config';
+import { DEFAULT_CONFIG, upgradeTspParams } from '../config';
 import { T } from '../fixtures.test-harness';
 import type { EntryEvent, RiskConfig, TrendInvalidation, TrendSignal, TrendState, TrendTrack } from '../types';
 import { allocateTiers, awayTick, ceilTick, floorTick, futuresTax, planRisk, roundTripCost, swingPoint, trailStop } from './plan';
 import { runVirtual } from './virtual';
 
-const R: RiskConfig = DEFAULT_CONFIG.risk;
+// 計畫與虛擬部位情境以規格 §2 的 1m 停損、NT$1,000 預算寫成（tsp-1.1.x 的預設），測的是成交與出場機制；
+// tsp-1.2.0 的預設（5m 停損、NT$2,500）見最後的「初始停損週期」
+const R: RiskConfig = { ...DEFAULT_CONFIG.risk, stopTf: 1, budget: 1000 };
 
 describe('tick 取整', () => {
     it('吃掉浮點誤差，支援小數 tick', () => {
@@ -350,7 +352,7 @@ describe('虛擬部位', () => {
     });
 });
 
-describe('風控模型（riskModel）', () => {
+describe('初始停損週期（stopTf）', () => {
     // 每個 5m 桶內 1m 先漲後跌（100→110→100）：1m 波動小、5m 波動大，兩種停損依據分得開
     const wave = (n: number, from = 0) => Array.from({ length: n }, (_, i) => {
         const lv = [100, 105, 110, 105, 100][(from + i) % 5]!;
@@ -363,28 +365,35 @@ describe('風控模型（riskModel）', () => {
         return alignPoints(m5, atr(m5, 14))[m5.findIndex((b) => b.time === label)]!;
     };
 
-    it('模型 1：初始停損改依 5m 的擺動點／ATR（比 1m 寬），保本與移動規則不變', () => {
-        const v0 = run(m1, [S], [entry(S)]).trades[0]!;
-        const v1 = run(m1, [S], [entry(S)], { cfg: { riskModel: 1 } }).trades[0]!;
-        expect(v1.fillPrice).toBe(v0.fillPrice);
-        // 5m 桶都一樣，沒有嚴格的 5m 擺動低點 → 只用 5m ATR
-        expect(v1.plan.stop).toBe(awayTick('LONG', v1.fillPrice - R.stopAtr * atr5At(m1, S.barTime), 1));
-        expect(v1.plan.riskPoints).toBeGreaterThan(v0.plan.riskPoints);
+    it('tsp-1.2.0 預設：5m 停損、每筆預算 NT$2,500', () => {
+        expect(DEFAULT_CONFIG.risk).toMatchObject({ stopTf: 5, budget: 2500 });
     });
 
-    it('模型 2：+1R 不移保本；進場後每根 5m 收棒就移動停損（不等 +2R）', () => {
-        // 10:41 起續漲（每分鐘 +2），過 +1R 但不到 +2R
-        const up = Array.from({ length: 15 }, (_, i) => bar(t0 + 60 * (121 + i), 100 + 2 * i, 101 + 2 * i, 99 + 2 * i, 100 + 2 * i));
-        const bars = [...m1, ...up];
-        const s2 = sig('BUY', 23, t0 + 7200); // 5m 11:00
-        const v2 = run(bars, [s2], [entry(s2)], { cfg: { riskModel: 2 } }).trades[0]!;
-        const v1 = run(bars, [s2], [entry(s2)], { cfg: { riskModel: 1 } }).trades[0]!;
-        expect(v2.plan.stop).toBe(v1.plan.stop);
-        expect(v1.hit.r1).not.toBeNull();
-        expect(v1.stopHistory.map((x) => x.reason)).toContain('breakeven');
-        expect(v2.stopHistory.map((x) => x.reason)).not.toContain('breakeven');
-        expect(v2.hit.r2).toBeNull();
-        expect(v2.stopHistory.some((x) => x.reason === 'trail')).toBe(true);
-        expect(v1.stopHistory.some((x) => x.reason === 'trail')).toBe(false);
+    it('stopTf=5：初始停損依 5m 的擺動點／ATR（比 1m 寬），保本與移動規則不變', () => {
+        const v1 = run(m1, [S], [entry(S)]).trades[0]!;
+        const v5 = run(m1, [S], [entry(S)], { cfg: { stopTf: 5 } }).trades[0]!;
+        expect(v5.fillPrice).toBe(v1.fillPrice);
+        // 5m 桶都一樣，沒有嚴格的 5m 擺動低點 → 只用 5m ATR
+        expect(v5.plan.stop).toBe(awayTick('LONG', v5.fillPrice - R.stopAtr * atr5At(m1, S.barTime), 1));
+        expect(v5.plan.riskPoints).toBeGreaterThan(v1.plan.riskPoints);
+        expect(v5.plan.breakevenStop).toBe(v1.plan.breakevenStop);
+    });
+
+    it('stopTf=5 只用提示當下已收的 5m：桶內提示不讀進行中那根 5m', () => {
+        // 10:42 的提示（10:45 那根 5m 還沒收）→ 用 10:40 的 5m；之後 10:44–10:45 怎麼變都不影響初始停損
+        const hint = entry(S, t0 + 60 * 102, 105);
+        const base = run(m1, [S], [hint], { cfg: { stopTf: 5 } }).trades[0]!;
+        const crash = m1.map((b) => (b.time === t0 + 60 * 104 ? { ...b, low: 40 } : b.time === t0 + 60 * 105 ? { ...b, high: 180 } : b));
+        const later = run(crash, [S], [hint], { cfg: { stopTf: 5 } }).trades[0]!;
+        expect(later.fillTime).toBe(t0 + 60 * 103);
+        expect(later.plan.stop).toBe(base.plan.stop);
+        expect(base.plan.stop).toBe(awayTick('LONG', base.fillPrice - R.stopAtr * atr5At(m1, S.barTime), 1));
+    });
+
+    it('Web 舊實例升級：沒有 stopTf 且預算是舊預設 NT$1,000 → 升到 NT$2,500；改過的預算保留，升級只做一次', () => {
+        expect(upgradeTspParams({ algo: 1, budget: 1000 })).toEqual({ algo: 1, budget: 2500, stopTf: 5 });
+        expect(upgradeTspParams({ budget: 3000 })).toEqual({ budget: 3000, stopTf: 5 });
+        expect(upgradeTspParams({ budget: 1000, stopTf: 5 })).toEqual({ budget: 1000, stopTf: 5 });
+        expect(upgradeTspParams({ budget: 1000, stopTf: 1 })).toEqual({ budget: 1000, stopTf: 1 });
     });
 });

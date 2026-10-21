@@ -1,8 +1,9 @@
-// Trend Signal Pro tsp-app-1.3.0 — Web/App 共用計算函式，官方 App 自訂指標
+// Trend Signal Pro tsp-app-1.4.0 — Web/App 共用計算函式，官方 App 自訂指標
 // 由 npm run build:tsp-custom 產生；請修改 src/lib/trend-signal 的共用來源。
 // 5m 是主趨勢並判斷進出場，1m 是精準進出場；App 只給主圖本身的 K 棒，所以依主圖週期：
 //   1m 主圖：原模型（由 1m 聚合 5m 主趨勢、1m 精準提示、虛擬風控），與 Web 逐根相同。
-//   5m 主圖：5m 主趨勢與 5m 收棒的進出場（IMMEDIATE）；沒有 1m，不畫 1m 提示，停損以 5m K 棒近似。
+//   5m 主圖：5m 主趨勢＋三種進場模式與虛擬風控，全部用 5m K 棒（提示看不到 5 分鐘內的回檔）。
+// 初始停損預設依 5m 擺動點與 5m ATR（stopTf=5；1＝1m 原規則），每筆風險預算預設 NT$2,500。
 //   15m／60m／日K：只畫該週期趨勢線作高週期輔助，不產生訊號、進出場與風控。
 // 預設明訂微台：tick=1、每點10元、單邊手續費12元、單邊期交稅0.00002；不自動辨識商品或真實持倉。
 // 輸出19條：趨勢/提示、初始/目前停損、保本、1R/2R/3R、虛擬進出場；全部為觀察與虛擬計算。
@@ -257,8 +258,9 @@
 	*  1.1.0：TrendCore 四態（含 NEUTRAL）與 Donchian＋ATR、整段趨勢的多次 1m 提示（V1.1）
 	*  1.1.1：缺分鐘的 5m 不參與計算、5m 桶內缺分鐘後的 1m 不提示、即時資料以涵蓋判定已收並凍結
 	*  1.1.2：停用重啟重設接收涵蓋、心跳不推進資料確認、補抓回應順序與多口進場稅分配修正
-	*  1.1.3：虛擬進場的下一分鐘缺棒時取消，不延後到下一根現存 K 棒 */
-	var TSP_ALGO_VERSION = "tsp-1.1.3";
+	*  1.1.3：虛擬進場的下一分鐘缺棒時取消，不延後到下一根現存 K 棒
+	*  1.2.0：初始停損預設改依 5m 擺動點與 5m ATR（stopTf=5；1 為原規則）、每筆預算預設 NT$2,500（使用者決定，研究結果 7） */
+	var TSP_ALGO_VERSION = "tsp-1.2.0";
 	var TREND_ALGOS = [
 		"supertrend",
 		"donchian",
@@ -406,7 +408,7 @@
 		{
 			key: "budget",
 			label: "風控｜每筆風險預算 NT$",
-			def: 1e3,
+			def: 2500,
 			min: 100,
 			max: 1e6,
 			step: 100
@@ -433,15 +435,23 @@
 			max: 50
 		},
 		{
+			key: "stopTf",
+			label: "風控｜初始停損週期（5 主趨勢 5m／1 進場 1m 的擺動點與 ATR）",
+			def: 5,
+			min: 1,
+			max: 5,
+			step: 4
+		},
+		{
 			key: "swingBars",
-			label: "風控｜擺動高低點 K 棒數（1m）",
+			label: "風控｜擺動高低點 K 棒數（停損週期）",
 			def: 5,
 			min: 3,
 			max: 30
 		},
 		{
 			key: "stopAtr",
-			label: "風控｜初始停損 ATR 倍數（1m）",
+			label: "風控｜初始停損 ATR 倍數（停損週期 ATR14）",
 			def: 1.5,
 			min: .5,
 			max: 5,
@@ -482,13 +492,6 @@
 			def: 1,
 			min: 0,
 			max: 50
-		},
-		{
-			key: "riskModel",
-			label: "風控｜模型（0 1m 停損＋保本／1 5m 停損＋保本／2 5m 停損＋進場即移動停損）",
-			def: 0,
-			min: 0,
-			max: 2
 		}
 	];
 	var DEFAULTS = Object.fromEntries(TSP_PARAMS.map((p) => [p.key, p.def]));
@@ -529,7 +532,6 @@
 			minPullbackAtr: param(p, "minPullbackAtr")
 		};
 		const singleExit = int(p, "singleExit");
-		const riskModel = int(p, "riskModel");
 		return {
 			trend,
 			note,
@@ -546,7 +548,7 @@
 				tierMode: int(p, "tierMode") >= 1 ? "custom" : "auto",
 				tp2Lots: int(p, "tp2Lots"),
 				tp3Lots: int(p, "tp3Lots"),
-				riskModel: riskModel === 2 ? 2 : riskModel === 1 ? 1 : 0
+				stopTf: int(p, "stopTf") === 1 ? 1 : 5
 			}
 		};
 	}
@@ -821,7 +823,7 @@
 	var awayTick = (dir, p, tick) => dir === "LONG" ? floorTick(p, tick) : ceilTick(p, tick);
 	/** 往有利方向取整（目標至少 k×R） */
 	var towardTick = (dir, p, tick) => dir === "LONG" ? ceilTick(p, tick) : floorTick(p, tick);
-	/** 最近 n 根已收 1m（結尾 m）內的確認擺動低點（多）／高點（空）：
+	/** 最近 n 根已收 K 棒（結尾 m；1m 或 5m，依 stopTf）內的確認擺動低點（多）／高點（空）：
 	*  左鄰嚴格較高（低）、右鄰不低於（不高於），右鄰必須也已收 → k ≤ m − 1。
 	*  多個時取最低（最高），即最保守的結構失效點。 */
 	function swingPoint(bars, m, n, dir) {
@@ -895,7 +897,7 @@
 			trail: qty - r2 - r3
 		};
 	}
-	/** 初始停損（多）＝ min(擺動低點 − 1 tick, 進場 − stopAtr × ATR)；空單鏡像。
+	/** 初始停損（多）＝ min(擺動低點 − 1 tick, 進場 − stopAtr × ATR)，擺動點與 ATR 取 stopTf 週期；空單鏡像。
 	*  R 由進場價與初始停損決定，之後不再改變。 */
 	function planRisk(inp) {
 		const { direction: dir, entry, tick, cfg } = inp;
@@ -1108,9 +1110,9 @@
 					continue;
 				}
 				const idx = lastAtOrBefore(m1, bt);
-				const j5 = cfg.riskModel === 0 ? -1 : lastAtOrBefore(m5.bars, bt);
-				const swing = cfg.riskModel === 0 ? idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : void 0 : j5 >= 1 ? swingPoint(m5.bars, j5, cfg.swingBars, e.direction) : void 0;
-				const a = cfg.riskModel === 0 ? idx >= 0 ? atr1[idx] : void 0 : j5 >= 0 ? atr5[j5] : void 0;
+				const j5 = cfg.stopTf === 5 ? lastAtOrBefore(m5.bars, bt) : -1;
+				const swing = cfg.stopTf === 5 ? j5 >= 1 ? swingPoint(m5.bars, j5, cfg.swingBars, e.direction) : void 0 : idx >= 1 ? swingPoint(m1, idx, cfg.swingBars, e.direction) : void 0;
+				const a = cfg.stopTf === 5 ? j5 >= 0 ? atr5[j5] : void 0 : idx >= 0 ? atr1[idx] : void 0;
 				const plan = planRisk({
 					direction: e.direction,
 					entry: e.refPrice,
@@ -1206,7 +1208,7 @@
 								stop: plan.stop,
 								reason: "initial"
 							}],
-							trailing: cfg.riskModel === 2,
+							trailing: false,
 							hit: {
 								r1: null,
 								r2: null,
@@ -1260,11 +1262,8 @@
 			const p = vt.plan;
 			if (vt.hit.r1 === null && reached(p.r1)) {
 				vt.hit.r1 = t;
-				if (cfg.riskModel === 2) log(t, "TARGET", vt.id, `+1R ${p.r1} 到價（風控模型 2 不移保本，停損跟隨 ${trendLabel} 移動）`);
-				else {
-					log(t, "TARGET", vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
-					queueStop(p.breakevenStop, "breakeven");
-				}
+				log(t, "TARGET", vt.id, `+1R ${p.r1} 到價：停損移至保本 ${p.breakevenStop}（下一根生效）`);
+				queueStop(p.breakevenStop, "breakeven");
 			}
 			if (vt.hit.r2 === null && reached(p.r2)) {
 				vt.hit.r2 = t;
@@ -2115,8 +2114,8 @@
 		["BUY", "#00e5ff"],
 		["SELL", "#ff2bd6"],
 		["失效", "#e0a43c"],
-		["1m 微型提示", "#8fd3ff"],
-		["1m 結構提示", "#b06fff"],
+		["微型提示", "#8fd3ff"],
+		["結構提示", "#b06fff"],
 		["初始停損", "#ff4d6a"],
 		["目前停損", "#ffad33"],
 		["保本價", "#d0d8e8"],
@@ -2213,8 +2212,8 @@
 		for (const s of res.signals) put(s.kind, s.barTime, s.close);
 		for (const x of res.invalidations) put("失效", x.barTime, res.m5.bars[x.index].close);
 		for (const e of res.entries) {
-			if (e.mode === "MICRO_TREND") put("1m 微型提示", e.barTime, e.refPrice);
-			if (e.mode === "PRICE_STRUCTURE") put("1m 結構提示", e.barTime, e.refPrice);
+			if (e.mode === "MICRO_TREND") put("微型提示", e.barTime, e.refPrice);
+			if (e.mode === "PRICE_STRUCTURE") put("結構提示", e.barTime, e.refPrice);
 		}
 		const times = [...indexes.keys()].sort((a, b) => a - b);
 		for (const trade of res.trades) {
@@ -2244,8 +2243,6 @@
 	//#region src/lib/trend-signal/chart-custom.ts
 	var CHART_TSP_VERSION = "tsp-chart-1.2.0";
 	var DAY = 86400;
-	var nameOf = (key) => key === "1m 微型提示" ? "本圖微型提示" : key === "1m 結構提示" ? "本圖結構提示" : key;
-	CUSTOM_TSP_PLOTS.map(([key, color]) => [nameOf(key), color]);
 	/** 宿主未傳 tf；預設由間距推斷，可用 chartTf 明訂分鐘數消除缺棒歧義。 */
 	function inferChartMinutes(times, explicit = 0) {
 		if (!Number.isInteger(explicit) || explicit < 0 || explicit > 1440) throw new Error("chartTf 必須為 0（自動）或 1–1440 分鐘");
@@ -2319,7 +2316,7 @@
 			config: configFromParams(params)
 		};
 	}
-	/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助、或進場模式需要 1m 時） */
+	/** risk=false：只算趨勢、訊號與提示，不建立虛擬部位（App 的高週期輔助） */
 	function runChartSignal(frame, opts = {}) {
 		const { series, config: cfg, asOf, label } = frame;
 		const track = trendTrack(series, cfg.trend);
@@ -2449,6 +2446,13 @@
 		"3R"
 	]);
 	var empty = (n) => Object.fromEntries(APP_TSP_PLOTS.map(([k]) => [k, new Array(n).fill(null)]));
+	/** 5m 主圖的微型趨勢與主趨勢算在同一組 5m K 棒上：沿用 1m 主圖的預設會與主趨勢完全相同、MICRO_TREND 永遠不提示。
+	*  改用較靈敏的預設（只依提示頻率選定，研究結果 7.3）；使用者在 App 宣告了該參數就照用 */
+	var M5_MICRO_DEFAULTS = {
+		microStMult: 1,
+		microDcLength: 5,
+		microKamaHyst: .05
+	};
 	/** 主圖週期 → 計算方式 */
 	function appModeOf(minutes) {
 		return minutes === 1 ? "model" : minutes === 5 ? "m5" : "aux";
@@ -2482,12 +2486,12 @@
 			}
 			result = res;
 		} else {
-			const frame = frameFromChart(bars, params, nowWall);
-			const res = runChartSignal(frame, { risk: mode === "m5" && frame.config.entry.mode === "IMMEDIATE" });
-			const shown = mode === "m5" ? {
-				...res,
-				entries: []
-			} : {
+			const frame = frameFromChart(bars, mode === "m5" ? {
+				...M5_MICRO_DEFAULTS,
+				...params
+			} : params, nowWall);
+			const res = runChartSignal(frame, { risk: mode === "m5" });
+			const shown = mode === "m5" ? res : {
 				...res,
 				signals: [],
 				invalidations: [],

@@ -27,7 +27,7 @@ export const awayTick = (dir: Direction, p: number, tick: number) =>
 export const towardTick = (dir: Direction, p: number, tick: number) =>
     dir === 'LONG' ? ceilTick(p, tick) : floorTick(p, tick);
 
-/** 最近 n 根已收 1m（結尾 m）內的確認擺動低點（多）／高點（空）：
+/** 最近 n 根已收 K 棒（結尾 m；1m 或 5m，依 stopTf）內的確認擺動低點（多）／高點（空）：
  *  左鄰嚴格較高（低）、右鄰不低於（不高於），右鄰必須也已收 → k ≤ m − 1。
  *  多個時取最低（最高），即最保守的結構失效點。 */
 export function swingPoint(bars: Candle[], m: number, n: number, dir: Direction): number | undefined {
@@ -97,7 +97,7 @@ export interface PlanInput {
     fixedQty?: number;
 }
 
-/** 初始停損（多）＝ min(擺動低點 − 1 tick, 進場 − stopAtr × ATR)；空單鏡像。
+/** 初始停損（多）＝ min(擺動低點 − 1 tick, 進場 − stopAtr × ATR)，擺動點與 ATR 取 stopTf 週期；空單鏡像。
  *  R 由進場價與初始停損決定，之後不再改變。 */
 export function planRisk(inp: PlanInput): RiskPlan {
     const { direction: dir, entry, tick, cfg } = inp;

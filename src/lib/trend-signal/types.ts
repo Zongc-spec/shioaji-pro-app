@@ -70,10 +70,8 @@ export interface RiskConfig {
     tierMode: 'auto' | 'custom';
     tp2Lots: number;
     tp3Lots: number;
-    /** 風控模型：0＝初始停損依進場週期（1m）的擺動點／ATR、+1R 保本、+2R 起移動停損；
-     *  1＝初始停損改依主趨勢週期（5m）的擺動點／ATR，保本與移動規則同 0；
-     *  2＝初始停損同 1、不移保本，進場後每根 5m 收棒就開始移動停損 */
-    riskModel: 0 | 1 | 2;
+    /** 初始停損依哪個週期的擺動點與 ATR14：5＝主趨勢 5m（tsp-1.2.0 起預設）；1＝進場 1m（規格 §2 原規則） */
+    stopTf: 1 | 5;
 }
 
 export interface TrendSignalConfig {
