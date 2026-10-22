@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { APP_TSP_VERSION, computeAppCustomTsp } from '../../src/lib/trend-signal/app-custom';
 import { runCustom, type BarsInput } from '../../src/lib/custom-runtime';
+import { configFromParams } from '../../src/lib/trend-signal/config';
 import { exitText } from '../../src/lib/trend-signal/risk/virtual';
 import { aggregate, kbarsToCandles, nowWallClockUtc } from '../../src/lib/utils/kbars';
 import type { Candle } from '../../src/lib/types/market';
@@ -19,7 +20,6 @@ interface Props {
     minutes: number;
     params: Record<string, number>;
     source: string;
-    budgetOverride?: number;
 }
 
 function asInput(candles: Candle[]): BarsInput {
@@ -30,7 +30,7 @@ function asInput(candles: Candle[]): BarsInput {
     };
 }
 
-export function ChartAudit({ timeframe, minutes, params, source, budgetOverride }: Props) {
+export function ChartAudit({ timeframe, minutes, params, source }: Props) {
     const [candles, setCandles] = useState<Candle[] | null>(null);
     const [loadError, setLoadError] = useState('');
     useEffect(() => {
@@ -48,7 +48,8 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
         try {
             const chart = aggregate(candles, minutes);
             const bars = asInput(chart);
-            const apiParams = { ...params, chartTf: minutes };
+            // 必須和圖上實例傳入同一組參數；不可只在審計端強制覆寫chartTf。
+            const apiParams = params;
             const now = nowWallClockUtc();
             const direct = computeAppCustomTsp(bars, apiParams, now);
             // runCustom executes the actual self-contained official custom script.
@@ -73,7 +74,8 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
                 const expected = direct.hints[key];
                 const actual = runtime.hints[key];
                 return !!expected && !!actual && expected.kind === actual.kind &&
-                    expected.color === actual.color && expected.width === actual.width;
+                    expected.color === actual.color && expected.width === actual.width && expected.plot === actual.plot &&
+                    JSON.stringify(expected.markers ?? null) === JSON.stringify(actual.markers ?? null);
             });
             const lastBar = chart.at(-1) ?? null;
             const trades = direct.result?.trades ?? [];
@@ -110,7 +112,7 @@ export function ChartAudit({ timeframe, minutes, params, source, budgetOverride 
         <div style={styles.row}><span style={styles.label}>週期／資料列</span><span>{timeframe}／{ok ? ok.chartBars : '—'}</span></div>
         <div style={styles.row}><span style={styles.label}>資料來源</span><span>stub 合成 1m → 本圖聚合</span></div>
         <div style={styles.row}><span style={styles.label}>本圖末棒</span><span>{ok ? wallTime(ok.lastBar?.time) : '—'}</span></div>
-        <div style={styles.row}><span style={styles.label}>虛擬風險預算</span><span>{money(budgetOverride ?? params.budget ?? 1000)}{budgetOverride !== undefined ? '（URL 測試值）' : '（預設）'}</span></div>
+        <div style={styles.row}><span style={styles.label}>虛擬風險預算</span><span>{money(configFromParams(params).risk.budget)}{params.budget !== undefined ? '（URL 設定）' : '（預設）'}</span></div>
 
         <section style={styles.section}>
             <strong>虛擬部位</strong>

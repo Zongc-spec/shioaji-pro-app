@@ -502,3 +502,49 @@ App 自訂指標只拿得到主圖本身的 OHLCV，依此分派（`app-custom.t
   tsp-1.2.0 每筆較好只有 3/9 → 不支持（依規則只回報、不自動改回）；「夜盤不開新倉」5/9 → 不列為候選、不實作。
   使用者看過結果後決定保留 tsp-1.2.0。
   同時查出兩年 CSV 缺每月 31 日（約占交易日 1.7%）。
+
+## 2026-10-21：cec405d 接續審查與驗收迴圈
+
+狀態：本機修正／再測／Web 與原生自訂指標驗收 `complete`；推送／PR／CI 待核准。使用者授權優化／測試／debug／再測／驗收；本輪從 `cec405d` 的隔離工作樹接續，沿用已定案 `tsp-1.2.0` 與 `tsp-app-1.4.0`，不依績效調參。推送、PR、合併仍須另行核准。
+
+- 先做兩條獨立 finder review：停損／費稅／參數升級／App 週期分派，以及 SSE／補抓／快取／單檔生成；作者處理確認的反例，再交 reviewer 複驗。
+- 原生 QA 先辨識 Windows App、sidecar、checkout 與可用 dev shell，保留正式程序及舊展示伺服器；區分單檔執行器、隔離 Web 與實際原生畫面。
+- 接手基線已驗：`npm test -- --maxWorkers=2` 3802 passed／2 skipped、exit 0；`npm run build` exit 0。此為基線驗證，不等於本輪獨立審查或原生驗收完成。
+
+### 獨立 code review 與修正
+
+- 風控 reviewer 自行檢查實作、呼叫與反例，81組Node原生TS記憶體探針 exit 0：六類空資料、三核心×三進場的歷史prefix因果性、1m/5m與實際單檔對照、較高週期不建部位、參數升級冪等；另手算停損優先、跳空、缺棒取消、live保護與超預算。三口手算例費稅96元、淨損216元。未發現確認的P1/P2。
+- feed reviewer 獨立核對補抓範圍、空回應、回應排序與快取隔離、CRLF產物比對；未發現確認的P1/P2。指出累計量不連續不能直接斷言漏收，因上游重設語義尚未知；目前單次補抓可收斂，保守完整性檢查不放寬。
+- 面板與說明改為「累計量不連續」，描述未確認分鐘等待伺服器歷史，不宣稱已知原因。
+- Web目視發現demo容器未傳遞flex高度（1200高視窗僅約400高圖）；補齊容器flex。自訂參數僅宣告URL明訂值，避免1m微型預設覆蓋5m未宣告時的預設，也縮短legend；圖與審計共用相同參數與週期推斷，預算顯示讀同一設定。
+- demo原先畫出回放時刻之後的完整OHLC。新增回歸測試先紅後綠，stub只提供當時已完成的1m，所有欄位同切點、保留原始快取，時間推進才露出下一棒。這些只影響demo，不改正式行情或模型公式。
+- feed reviewer 複核上述delta，無未解阻擋；另將demo加入TypeScript專案include，讓回歸測試直接驗真實stub而不避開型別檢查；reviewer 另讀此設定差異，確認未排除測試或放寬檢查。
+
+### 本輪測試與Web驗收
+
+- `npm test -- --maxWorkers=2 src/components/trend-signal-panel.test.ts src/hooks/use-trend-signal.test.tsx src/lib/trend-signal/core/feed.test.ts`：33 passed，exit 0。
+- `npm test -- --maxWorkers=2 src/lib/trend-signal/demo-history.test.ts`：修前exit 1，02:00:30錯誤含02:01完整OHLC；修正後與panel合跑8 passed，exit 0。
+- 最終 `npm test -- --maxWorkers=2`：238 files passed／1 skipped，3803 passed／2 skipped，exit 0，53.15s；stdout `/tmp/tsp-cec405d-loop-tests-final.log`。
+- 首次 `npm run build` exit 2，TS6307指出測試直接import的demo stub未列入composite專案；加入 `scripts/tsp-demo` include後重跑 exit 0（產物查核、tsc -b、Vite build）。stdout `/tmp/tsp-cec405d-loop-build-final.log`；既有target/dynamic-import警告保留。
+- 隔離5299、CSP同源、合成資料，回放 `2026-08-27T02:00:00`；Chrome獨立profile擷取1m、5m微型模式、15m輔助，exit 0並實際目視。1m有OPEN虛擬多單與橘色階梯停損/R目標；5m當時空手、歷史進出點保留；15m僅趨勢、沒有虛擬部位。DOM檢查19輸出、逐項值與hint一致、切點正確，exit 0。初次DOM探針只接受半形斜線造成exit 1，修正探針接受畫面全形「／」後通過，沒有改產品迎合探針。
+- 新Web截圖：[1m](../images/tsp-app-1.4.0-web-1m-qa.png)、[5m](../images/tsp-app-1.4.0-web-5m-qa.png)；都不是原生或績效證據。原始截圖、DOM與Chrome log在 `/tmp/tsp-cec-web-qa/`。UNC暫存profile的資料庫鎖定/快取警告保留，沒有讀取既有個人profile。
+
+### 官方 App 原生交付與再驗
+
+已確認官方App PID10884、版本0.1.54，sidecar PID7924、正式21322；沒有dev 21323。Windows checkout僅前端、缺private shell，採既有官方App的自訂指標路徑。初次受限查詢遇WSL vsock/netlink權限失敗，按已授權的唯讀tool escalation後查核成功；未改Windows執行政策。
+
+App單檔仍為 `tsp-app-1.4.0`，SHA256 `2796f8d55d1ff56e030c73598918c5f0da4567cdda7fe902f66a7bfcc8c9dadc`，本輪不修改該產物。已同步Windows同名單檔，覆寫前備份 `/tmp/tsp-cec-native-qa/windows-custom-before.js`。Windows checkout 正規化 Git status 只有此單檔變更，沒有更新整個 checkout 或建置新的 App binary。
+
+- 建立本機指標 `TSP QA 1.4.0 cec405d`，舊版 `TSP 微台 1m 共用風控 1.1.3` 保留並隱藏，其他指標與圖表物件不變。驗證偵測19條輸出，全部勾選；只宣告 `entryMode`（0–2、step1）與 `riskHistory`（0–1、step1）。
+- 初次目視抓到新指標被放在副圖、舊版歷史連線干擾判讀；改為「主圖疊加」並隱藏舊版後重新跑矩陣。確認目前停損原為「線」，改成「階梯線」、確定後關閉重開，仍為階梯線且選項 active；趨勢與其他價位用線，進出點用圓點。圖上數值與價格軸最新值標籤均為 On。
+- 原生1m、5m各實測進場模式0／1／2，逐個讀回實例legend的 `(mode,0)`；15m／60m／日K只見輔助趨勢，沒有交易提示。當時1m立即模式有虛擬空單，初始與目前停損47,473、保本47,224、1R46,989／2R46,747／3R46,505；5m微型模式當時空手，風控欄為空。3R價位線在截圖下緣外，legend仍可讀值。
+- 重開App編輯器以UIA TextPattern讀回已存source，CRLF/LF正規化並去掉尾端換行後，與Windows候選完全相等；文字SHA256 `65c42c6b5bf43606d338b42c79771182f59aea3610ba107e579116ecdbae30a1`。此為文字hash，與上列檔案位元組hash分開；查核exit0。
+- 最終留下1m／entryMode0／riskHistory0，新QA指標可見、所有模態窗已關閉。唯讀環境查核exit0，App PID10884／sidecar PID7924／21322 listener驗收前後一致，21323仍無listener；未操作交易、帳戶、登入或正式服務，也未直接呼叫sidecar API。既有5298保留。
+- UIA查詢曾因空bounding rect轉型失敗exit1，改加IsEmpty防護後exit0；一次批次模式查詢逾時且沒有截圖輸出，改成逐步切換完成矩陣。中間副圖／未儲存樣式截圖保留，不作最終證據；沒有修改執行政策或繞過未簽章PS1限制。
+- 最終圖證：[原生1m](../images/tsp-app-1.4.0-native-1m-qa.png)、[原生5m](../images/tsp-app-1.4.0-native-5m-qa.png)、[停損樣式重開讀回](../images/tsp-app-1.4.0-native-stop-style-qa.png)。完整原生回條與模式截圖在 `/tmp/tsp-cec-native-qa/native-ui-qa-final.md`；主agent已目視上述最終圖及15m／日K。
+
+### 驗收界線與下一關
+
+- 已完成獨立code review、修正、回歸、型別／建置查核、Web對照及官方App自訂指標的操作驗收。這不等同人類最終核可或PR／CI完成；依交接文件§7，推送、開PR與合併前仍須詢問使用者。
+- 原生當時停損尚未移動，沒有驗到盤中動態階梯更新；沒有驗真實帳戶風控。Web面板原生binary仍缺private shell，只做隔離Web驗證。App腳本本身沒有Feed凍結、完整審計或逐點文字箭頭，這些既有限制保留。
+- 不新增研究、不調模型或風險預算；既有負績效與使用者保留tsp-1.2.0的決定不變。P4與送單仍未授權。

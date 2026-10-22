@@ -6,20 +6,20 @@
 //   其他週期   拿不到 5m 主趨勢：只畫該週期自己的趨勢線作高週期輔助，不產生訊號、進出場與風控
 // 三種主圖輸出同一組 19 條（App 存檔時依輸出名稱保留樣式），算不出的序列為空。
 
-import type { BarsInput, PlotHint } from '../custom-runtime';
+import type { BarsInput } from '../custom-runtime';
 import { nowWallClockUtc } from '../utils/kbars';
+import { appTspPlotHints } from './app-plot-style';
 import { frameFromChart, inferChartMinutes, keepLastChartSegment, runChartSignal } from './chart-custom';
 import { CUSTOM_TSP_PLOTS, inputFromCustomBars, normalizeCustomBars, projectCustomTsp } from './custom-adapter';
 import { tradingSessionOf } from './core/session';
 import { runTrendSignal } from './engine';
 import type { TrendSignalResult } from './types';
 
-export const APP_TSP_VERSION = 'tsp-app-1.4.0';
+export const APP_TSP_VERSION = 'tsp-app-1.5.1';
 export type AppTspMode = 'model' | 'm5' | 'aux';
 export const APP_TSP_PLOTS = CUSTOM_TSP_PLOTS;
 
 type Outputs = Record<string, (number | null)[]>;
-const LEVELS = new Set(['初始停損', '目前停損', '保本價', '1R', '2R', '3R']);
 const empty = (n: number): Outputs => Object.fromEntries(APP_TSP_PLOTS.map(([k]) => [k, new Array<number | null>(n).fill(null)]));
 /** 5m 主圖的微型趨勢與主趨勢算在同一組 5m K 棒上：沿用 1m 主圖的預設會與主趨勢完全相同、MICRO_TREND 永遠不提示。
  *  改用較靈敏的預設（只依提示頻率選定，研究結果 7.3）；使用者在 App 宣告了該參數就照用 */
@@ -73,8 +73,6 @@ export function computeAppCustomTsp(bars: BarsInput, params: Record<string, numb
         keepLastChartSegment(outputs, frame, res.t5.dir, mapped);
         result = res;
     }
-    const hints = Object.fromEntries(APP_TSP_PLOTS.map(([key, color]) => [key, { color,
-        kind: key.endsWith('趨勢線') ? 'line' : LEVELS.has(key) && !riskHistory ? 'line' : 'points',
-        width: key === '目前停損' || key.endsWith('趨勢線') ? 2 : 1 } satisfies PlotHint]));
+    const hints = appTspPlotHints(outputs, bars.time, result, mode, riskHistory);
     return { mode, result, outputs, order: APP_TSP_PLOTS.map(([key]) => key), hints };
 }

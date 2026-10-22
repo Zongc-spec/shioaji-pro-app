@@ -1,6 +1,7 @@
 // demo stub of src/lib/chart-history.ts: 任何期間都回同一份回放 1m（vite 中介層提供；沒有就用合成資料）
 import { sessionLabels, walkBars } from '../../../src/lib/trend-signal/fixtures.test-harness';
 import type { KBars } from '../../../src/lib/types/market';
+import { nowWallClockUtc, wallClockToUtc } from '../../../src/lib/utils/kbars';
 
 let revision = 0;
 export const nextChartHistoryRevision = () => ++revision;
@@ -18,7 +19,14 @@ function synthetic(): KBars {
 let data: Promise<KBars> | null = null;
 export function fetchChartHistory(): Promise<KBars> {
     data ??= fetch('/__tsp_demo_data.json').then((r) => r.json()).then((j: KBars | null) => j ?? synthetic());
-    return data;
+    // 回放只提供當時已可能取得的收盤OHLC，不把完整的未來棒偽裝成live棒。
+    const through = Math.floor(nowWallClockUtc() / 60) * 60;
+    return data.then((bars) => {
+        const keep = bars.datetime.flatMap((t, i) => wallClockToUtc(t) <= through ? [i] : []);
+        const pick = (values: number[]) => keep.map((i) => values[i]!);
+        return { datetime: keep.map((i) => bars.datetime[i]!), Open: pick(bars.Open), High: pick(bars.High),
+            Low: pick(bars.Low), Close: pick(bars.Close), Volume: pick(bars.Volume), Amount: pick(bars.Amount) };
+    });
 }
 /** 同正式版：資料＋請求時刻（回放時鐘，main.tsx 把 Date.now 固定在 replayAt 附近） */
 export function fetchChartHistoryStamped(): Promise<{ kbars: KBars; requestedAt: number }> {

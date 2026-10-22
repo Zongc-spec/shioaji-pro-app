@@ -224,7 +224,7 @@ describe('單檔的顯示與錯誤界線', () => {
         const app = script(m1, params, closedAt);
         const open = res.snapshot.trade?.status === 'OPEN' ? res.snapshot.trade : null;
         for (const key of LEVELS) {
-            expect(app.hints[key]?.kind).toBe('line');
+            expect(app.hints[key]?.kind).toBe('dashed');
             m1.forEach((b, i) => { if (!open || b.time < open.fillTime) expect(app.outputs[key]![i]).toBeNull(); });
         }
         const history = script(m1, { ...params, riskHistory: 1 }, closedAt);
@@ -237,6 +237,27 @@ describe('單檔的顯示與錯誤界線', () => {
             setNow(closedAt);
             const invalid: Record<string, number>[] = [{ tick: NaN }, { pointValue: Infinity }, { taxRate: -1 }, { chartTf: 0.5 }, { chartTf: 1441 }, { riskHistory: 2 }];
             for (const params of invalid) expect(runCustom(SOURCE, toInput(bars), params).error).toBeTruthy();
+        }
+    });
+
+    it('三角形只標在虛擬進出場；主趨勢切換與提示維持圓點（1m 與 5m 主圖都一樣）', () => {
+        const ENTRY_EXIT = ['虛擬進場多', '虛擬進場空', '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
+        for (const bars of [m1, chart5]) {
+            const app = script(bars, { qty: 3, budget: 100000 }, closedAt);
+            for (const key of KEYS.filter((k) => !ENTRY_EXIT.includes(k))) {
+                expect(app.hints[key]?.markers?.every((m) => m === null) ?? true).toBe(true);
+            }
+            expect(marked(app.outputs.BUY!).length + marked(app.outputs.SELL!).length).toBeGreaterThan(0);
+            for (const key of ENTRY_EXIT) {
+                app.outputs[key]!.forEach((v, i) => {
+                    const m = app.hints[key]?.markers?.[i] ?? null;
+                    if (v === null) expect(m).toBeNull();
+                    else expect(m?.side === 'Buy' || m?.side === 'Sell').toBe(true);
+                });
+            }
+            expect(marked(app.outputs['虛擬進場多']!).length + marked(app.outputs['虛擬進場空']!).length).toBeGreaterThan(0);
+            for (const key of TREND) expect(app.hints[key]?.kind).toBe('line');
+            expect(app.hints['目前停損']).toMatchObject({ kind: 'dashed', plot: 'step' });
         }
     });
 

@@ -131,10 +131,13 @@ function toDef(c: CustomIndicator): IndicatorDef {
             for (const o of outputs) {
                 const ser = res.outputs[o.key];
                 if (!ser) continue;
+                const markers = res.hints[o.key]?.markers;
                 out[o.key] = bars.map((b, i) =>
                     ser[i] === null || ser[i] === undefined
                         ? { time: b.time }
-                        : { time: b.time, value: ser[i]! },
+                        : markers?.[i]
+                          ? { time: b.time, value: ser[i]!, marker: { ...markers[i]! } }
+                          : { time: b.time, value: ser[i]! },
                 );
             }
             return out;

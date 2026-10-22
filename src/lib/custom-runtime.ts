@@ -5,12 +5,15 @@
 
 import * as ta from './ta';
 import type { Ser } from './ta';
+import type { IndicatorMarker } from './indicators';
 
 export interface PlotHint {
     color?: string;
     kind?: 'line' | 'dashed' | 'histogram' | 'points';
     signed?: boolean;
     width?: 1 | 2;
+    markers?: (IndicatorMarker | null)[];
+    plot?: 'step';
 }
 
 export interface CustomRunResult {
@@ -89,6 +92,33 @@ export function runCustom(
             ser[i] =
                 typeof v === 'number' && Number.isFinite(v) ? v : null;
         }
+        const markerHints = opts && typeof opts === 'object' && 'markers' in opts
+            ? opts.markers
+            : undefined;
+        if (markerHints !== undefined && !Array.isArray(markerHints)) {
+            throw new Error(`plot('${name}') markers 必須是與序列等長的陣列`);
+        }
+        if (Array.isArray(markerHints) && markerHints.length !== n) {
+            throw new Error(`plot('${name}') markers 長度必須為 ${n}`);
+        }
+        const markers = Array.isArray(markerHints)
+            ? markerHints.map((marker, i) => {
+                  // 與數值序列一樣容忍 falsy（`cond && {...}`）：當作沒有標記
+                  if (!marker) return null;
+                  if (typeof marker !== 'object' || Array.isArray(marker)) {
+                      throw new Error(`plot('${name}') markers[${i}] 格式無效`);
+                  }
+                  const item = marker as { side?: unknown; text?: unknown };
+                  if (item.side !== 'Buy' && item.side !== 'Sell') {
+                      throw new Error(`plot('${name}') markers[${i}].side 必須是 Buy 或 Sell`);
+                  }
+                  if (typeof item.text !== 'string' || item.text.length > 80) {
+                      throw new Error(`plot('${name}') markers[${i}].text 必須是 80 字以內的字串`);
+                  }
+                  if (ser[i] === null) return null;
+                  return { side: item.side, text: item.text } satisfies IndicatorMarker;
+              })
+            : undefined;
         if (!(name in outputs)) order.push(name);
         outputs[name] = ser;
         if (opts && typeof opts === 'object') {
@@ -96,10 +126,18 @@ export function runCustom(
                 ...(typeof opts.color === 'string'
                     ? { color: opts.color }
                     : {}),
-                ...(opts.kind ? { kind: opts.kind } : {}),
+                ...(opts.kind === 'line' || opts.kind === 'dashed' || opts.kind === 'histogram' || opts.kind === 'points'
+                    ? { kind: opts.kind }
+                    : {}),
                 ...(opts.signed ? { signed: true } : {}),
                 ...(opts.width ? { width: opts.width } : {}),
+                ...(opts.plot === 'step' ? { plot: opts.plot } : {}),
+                ...(markers ? { markers } : {}),
             };
+        } else if (hints[name]?.markers) {
+            // 同名輸出重畫但沒帶 opts：舊 markers 是對齊上一個序列的，不能套到新序列
+            const { markers: _stale, ...rest } = hints[name]!;
+            hints[name] = rest;
         }
     };
 

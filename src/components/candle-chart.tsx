@@ -85,8 +85,9 @@ import {
 } from './indicator-dialog';
 // side-effect import順序：custom-indicators 在 module 載入時就把已存的
 // 自訂指標註冊進 DEF_BY_TYPE，loadInstances() 的型別過濾才不會把它們丟掉
-import { subscribeCustoms } from '../lib/custom-indicators';
+import { CUSTOM_PREFIX, subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
+import { ChartTradeMarkers, type ChartTradeMarker } from '../lib/chart-trade-markers';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
 import { cancelOrder, updateOrderPrice } from '../lib/shioaji';
 import { canUpdateOrderPrice } from '../lib/odd-lot';
@@ -1203,6 +1204,8 @@ export function CandleChart({
             ) as SeriesDataItemTypeMap['Line'][];
 
         let paneIdx = 1;
+        const markerCleanup: (() => void)[] = [];
+        const candleByTime = new Map(bars.map((bar) => [bar.time, bar]));
         legendMetaRef.current = new Map();
         for (const inst of instances) {
             const def = DEF_BY_TYPE.get(inst.type);
@@ -1227,6 +1230,7 @@ export function CandleChart({
                 continue; // a bad param combination must not kill the chart
             }
             const pane = def.category === 'pane' ? paneIdx++ : 0;
+            const tradeMarkers: ChartTradeMarker[] = [];
             if (pane > 0) paneAssign.set(inst.id, pane);
             let firstSeries: ISeriesApi<'Line' | 'Histogram'> | null = null;
             const metas: {
@@ -1263,8 +1267,15 @@ export function CandleChart({
                 const st = outputStyle(inst, def, o.key);
                 if (!st.visible) continue;
                 const color = colorWithOpacity(st.color, st.opacity);
+                const marked = pts.some((point) => point.marker !== undefined);
+                if (marked) for (const point of pts) {
+                    if (!point.marker || point.value === undefined) continue;
+                    const candle = pane === 0 ? candleByTime.get(point.time) : undefined;
+                    tradeMarkers.push({ ...point.marker, time: point.time, price: point.value, color,
+                        ...(candle ? { high: candle.high, low: candle.low } : {}) });
+                }
                 let s: ISeriesApi<'Line' | 'Histogram' | 'Area'>;
-                if (st.plot === 'histogram') {
+                if (!marked && st.plot === 'histogram') {
                     s = chart.addSeries(
                         HistogramSeries,
                         { color, ...labelOpts, ...priceFormatOpt },
@@ -1283,7 +1294,7 @@ export function CandleChart({
                                     : color,
                             })),
                     );
-                } else if (st.plot === 'area') {
+                } else if (!marked && st.plot === 'area') {
                     s = chart.addSeries(
                         AreaSeries,
                         {
@@ -1307,6 +1318,7 @@ export function CandleChart({
                         {
                             color,
                             lineWidth: st.width,
+                            title: o.kind === 'dashed' && inst.type.startsWith(CUSTOM_PREFIX) ? o.label : '',
                             lineStyle:
                                 o.kind === 'dashed'
                                     ? LineStyle.Dashed
@@ -1316,7 +1328,7 @@ export function CandleChart({
                                     ? LineType.WithSteps
                                     : LineType.Simple,
                             crosshairMarkerVisible: false,
-                            ...(st.plot === 'circles'
+                            ...(marked ? { lineVisible: false, pointMarkersVisible: false } : st.plot === 'circles'
                                 ? {
                                       lineVisible: false,
                                       pointMarkersVisible: true,
@@ -1340,6 +1352,14 @@ export function CandleChart({
                     series: s as ISeriesApi<'Line' | 'Histogram'>,
                     last: lastVal(pts),
                     precision: inst.precision,
+                });
+            }
+            const markerOwner = pane === 0 ? candleSeriesRef.current : firstSeries;
+            if (markerOwner && tradeMarkers.length > 0) {
+                const primitive = new ChartTradeMarkers(tradeMarkers);
+                markerOwner.attachPrimitive(primitive);
+                markerCleanup.push(() => {
+                    try { markerOwner.detachPrimitive(primitive); } catch { /* chart already removed */ }
                 });
             }
             // 圖上不顯示數值時 legend 只留名稱
@@ -1410,6 +1430,7 @@ export function CandleChart({
         }
         updateLegendRef.current(); // seed legend with latest values
         return () => {
+            for (const detach of markerCleanup) detach();
             paneRoRef.current?.disconnect();
             paneRoRef.current = null;
         };
