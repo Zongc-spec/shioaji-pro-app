@@ -240,6 +240,27 @@ describe('單檔的顯示與錯誤界線', () => {
         }
     });
 
+    it('三角形只標在虛擬進出場；主趨勢切換與提示維持圓點（1m 與 5m 主圖都一樣）', () => {
+        const ENTRY_EXIT = ['虛擬進場多', '虛擬進場空', '虛擬停損出場', '虛擬2R出場', '虛擬3R出場', '虛擬反轉失效出場'];
+        for (const bars of [m1, chart5]) {
+            const app = script(bars, { qty: 3, budget: 100000 }, closedAt);
+            for (const key of KEYS.filter((k) => !ENTRY_EXIT.includes(k))) {
+                expect(app.hints[key]?.markers?.every((m) => m === null) ?? true).toBe(true);
+            }
+            expect(marked(app.outputs.BUY!).length + marked(app.outputs.SELL!).length).toBeGreaterThan(0);
+            for (const key of ENTRY_EXIT) {
+                app.outputs[key]!.forEach((v, i) => {
+                    const m = app.hints[key]?.markers?.[i] ?? null;
+                    if (v === null) expect(m).toBeNull();
+                    else expect(m?.side === 'Buy' || m?.side === 'Sell').toBe(true);
+                });
+            }
+            expect(marked(app.outputs['虛擬進場多']!).length + marked(app.outputs['虛擬進場空']!).length).toBeGreaterThan(0);
+            for (const key of TREND) expect(app.hints[key]?.kind).toBe('line');
+            expect(app.hints['目前停損']).toMatchObject({ kind: 'dashed', plot: 'step' });
+        }
+    });
+
     it('空白與單根資料仍提供 19 條輸出（全為空）', () => {
         for (const bars of [[], [m1[0]!], [chart5[0]!]]) {
             const app = script(bars, {}, T('2026-10-20T10:00:00'));
