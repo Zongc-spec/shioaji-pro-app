@@ -94,6 +94,8 @@ const chip = () => view.root.findAll(n => n.type === 'button' && String(n.props[
 const pop = () => view.root.findAll(n => n.props.role === 'dialog')[0];
 const button = (root: ReactTestInstance, label: string) => root.findAll(n => n.type === 'button' && text(n) === label)[0]!;
 const flush = async () => { for (let i = 0; i < 6; i++) await act(async () => {}); };
+// boot.ts 的背景委託回報訂閱失敗時會另發「委託回報訂閱失敗」；它可能晚於圖表下單的通知才到，所以「最後一則」不算它
+const lastNotice = () => m.notify.mock.calls.map(c => c[0]).filter(n => n.title !== '委託回報訂閱失敗').at(-1)!;
 async function mount(props: Record<string, unknown>) {
     await act(async () => {
         view = create(createElement(CandleChart, props as any), { createNodeMock: () => {
@@ -151,7 +153,7 @@ it('#249 a 409 OrderOutcomeUnknown shows 結果不確定 (never 失敗) and is n
     await clickChart();
     await flush();
     expect(m.place).toHaveBeenCalledOnce();
-    const notice = m.notify.mock.calls.at(-1)![0];
+    const notice = lastNotice();
     expect(notice.title).toBe('圖表下單結果不確定');
     expect(notice.title + notice.body).not.toContain('失敗');
     expect(notice.body).toContain('請勿重新下單');
@@ -187,7 +189,7 @@ it.each(['symbol', 'switch back', 'unit', 'account', 'unmount'])(
         await act(async () => { release(); });
         await flush();
         expect(dispatched).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+        expect(lastNotice()).toMatchObject({ title: '圖表下單失敗' });
     },
 );
 
@@ -724,7 +726,7 @@ describe('chart order settings button', () => {
         await act(async () => { button(view.root, '點價買').props.onClick(); });
         await clickChart();
         expect(m.place).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('固定帳號已不可用') });
+        expect(lastNotice()).toMatchObject({ kind: 'err', body: expect.stringContaining('固定帳號已不可用') });
     });
 
     it('odd-lot stop/take pick their side from the odd-lot price, not the round-lot one', async () => {
@@ -750,7 +752,7 @@ describe('chart order settings button', () => {
         await act(async () => { button(view.root, '停損').props.onClick(); });
         await clickChart();
         expect(m.addTrigger).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
+        expect(lastNotice()).toMatchObject({ kind: 'err', body: expect.stringContaining('等待零股行情') });
     });
 
     it('another chart saving 設為預設 does not change an existing chart that never customised its settings', async () => {
@@ -818,7 +820,7 @@ describe('chart order credit conditions', () => {
         await clickChart();
         expect(m.place).toHaveBeenCalledOnce();
         expect(m.place.mock.calls[0]![4]).toMatchObject({ orderCond: 'MarginTrading', afterConfirm: expect.any(Function) });
-        expect(m.notify.mock.calls.at(-1)![0].title).toContain('融資買進已送出');
+        expect(lastNotice().title).toContain('融資買進已送出');
         await act(async () => { modeBtn('點價賣').props.onClick(); });
         await clickChart();
         // 融資賣出（償還）不查可否融資
@@ -887,7 +889,7 @@ describe('chart order credit conditions', () => {
         m.creditPost.mockResolvedValue([{ stock_id: '2330', system: 'ALL', update_time: '', margin_unit: 0, short_unit: 50, margin_loan_ratio: 60, short_margin_ratio: 90 }]);
         await clickChart();
         expect(m.place).toHaveBeenCalledOnce();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗', body: expect.stringContaining('不能融資買進') });
+        expect(lastNotice()).toMatchObject({ title: '圖表下單失敗', body: expect.stringContaining('不能融資買進') });
     });
 
     it('odd lot suspends credit (orders are cash) and back to 張 restores 融資', async () => {
@@ -979,7 +981,7 @@ describe('chart order credit conditions', () => {
         await act(async () => { release(); });
         await flush();
         expect(dispatched).not.toHaveBeenCalled();
-        expect(m.notify.mock.calls.at(-1)![0]).toMatchObject({ title: '圖表下單失敗' });
+        expect(lastNotice()).toMatchObject({ title: '圖表下單失敗' });
     });
 
     it('working order lines name a non-cash condition', async () => {
