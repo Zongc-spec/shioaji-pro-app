@@ -7,7 +7,9 @@
 //   15m／60m／日K：只畫該週期趨勢線作高週期輔助，不產生訊號、進出場與風控。
 // 預設明訂微台：tick=1、每點10元、單邊手續費12元、單邊期交稅0.00002；不自動辨識商品或真實持倉。
 // 輸出19條：趨勢/提示、初始/目前停損、保本、1R/2R/3R、虛擬進出場；全部為觀察與虛擬計算。
-// 趨勢線只顯示最後一段有效趨勢；目前停損請在App樣式手動選階梯線。
+// 趨勢線只顯示最後一段有效趨勢；目前風控為虛線，目前停損為階梯虛線。
+// 三角形與 Buy/Sell 文字需要支援 plot markers 的 App；舊 App 會忽略 markers，仍畫圓點。
+// 舊指標已保存的樣式優先：請將六項風控輸出改為虛線、目前停損選階梯線，或新建指標。
 // 不讀帳密、不連網、不送改撤單；沒有原生Feed的資料凍結、LIVE徽章或完整審計面板。
 // 更新歷史/載入起點/參數變更仍會重算；與Web比對需相同資料、asOf、商品規格與完整設定。
 (function() {
@@ -41,186 +43,6 @@
 	}
 	function msToWallClockUtc(ms) {
 		return Math.floor(ms / 1e3) + TW_OFFSET_SEC;
-	}
-	//#endregion
-	//#region src/lib/indicators.ts
-	function ema(bars, period) {
-		return emaOf(bars.map((b) => ({
-			time: b.time,
-			value: b.close
-		})), period);
-	}
-	function emaOf(points, period) {
-		const out = [];
-		const k = 2 / (period + 1);
-		let prev = null;
-		let seedSum = 0;
-		let seedCount = 0;
-		for (const p of points) {
-			if (p.value === void 0) continue;
-			if (prev === null) {
-				seedSum += p.value;
-				seedCount += 1;
-				if (seedCount === period) {
-					prev = seedSum / period;
-					out.push({
-						time: p.time,
-						value: prev
-					});
-				}
-				continue;
-			}
-			prev = p.value * k + prev * (1 - k);
-			out.push({
-				time: p.time,
-				value: prev
-			});
-		}
-		return out;
-	}
-	function trueRanges(bars) {
-		const tr = [];
-		for (let i = 0; i < bars.length; i++) {
-			const b = bars[i];
-			if (i === 0) {
-				tr.push(b.high - b.low);
-				continue;
-			}
-			const pc = bars[i - 1].close;
-			tr.push(Math.max(b.high - b.low, Math.abs(b.high - pc), Math.abs(b.low - pc)));
-		}
-		return tr;
-	}
-	function rma(values, period) {
-		const out = [];
-		let prev = null;
-		let seed = 0;
-		for (let i = 0; i < values.length; i++) {
-			if (prev === null) {
-				seed += values[i];
-				if (i === period - 1) {
-					prev = seed / period;
-					out.push(prev);
-				} else out.push(void 0);
-				continue;
-			}
-			prev = (prev * (period - 1) + values[i]) / period;
-			out.push(prev);
-		}
-		return out;
-	}
-	function atr(bars, period = 14) {
-		const smoothed = rma(trueRanges(bars), period);
-		const out = [];
-		for (let i = 0; i < bars.length; i++) {
-			const v = smoothed[i];
-			if (v !== void 0) out.push({
-				time: bars[i].time,
-				value: v
-			});
-		}
-		return out;
-	}
-	function supertrend(bars, period = 10, mult = 3) {
-		const atrLine = rma(trueRanges(bars), period);
-		const up = [];
-		const down = [];
-		let prevUpper = NaN;
-		let prevLower = NaN;
-		let trendUp = true;
-		let prevClose = NaN;
-		for (let i = 0; i < bars.length; i++) {
-			const b = bars[i];
-			const a = atrLine[i];
-			if (a === void 0) {
-				up.push({ time: b.time });
-				down.push({ time: b.time });
-				prevClose = b.close;
-				continue;
-			}
-			const mid = (b.high + b.low) / 2;
-			let upper = mid + mult * a;
-			let lower = mid - mult * a;
-			if (!Number.isNaN(prevUpper) && !(upper < prevUpper || prevClose > prevUpper)) upper = prevUpper;
-			if (!Number.isNaN(prevLower) && !(lower > prevLower || prevClose < prevLower)) lower = prevLower;
-			if (trendUp && b.close < lower) trendUp = false;
-			else if (!trendUp && b.close > upper) trendUp = true;
-			up.push(trendUp ? {
-				time: b.time,
-				value: lower
-			} : { time: b.time });
-			down.push(trendUp ? { time: b.time } : {
-				time: b.time,
-				value: upper
-			});
-			prevUpper = upper;
-			prevLower = lower;
-			prevClose = b.close;
-		}
-		return {
-			up,
-			down
-		};
-	}
-	function rsi(bars, period = 14) {
-		const gains = [];
-		const losses = [];
-		for (let i = 1; i < bars.length; i++) {
-			const chg = bars[i].close - bars[i - 1].close;
-			gains.push(Math.max(0, chg));
-			losses.push(Math.max(0, -chg));
-		}
-		const avgG = rma(gains, period);
-		const avgL = rma(losses, period);
-		const out = [];
-		for (let i = 0; i < gains.length; i++) {
-			const g = avgG[i];
-			const l = avgL[i];
-			if (g === void 0 || l === void 0) continue;
-			const v = l === 0 ? 100 : 100 - 100 / (1 + g / l);
-			out.push({
-				time: bars[i + 1].time,
-				value: v
-			});
-		}
-		return out;
-	}
-	function stoch(bars, kPeriod = 9, kSmooth = 3, dPeriod = 3) {
-		const rsv = [];
-		for (let i = kPeriod - 1; i < bars.length; i++) {
-			let hi = -Infinity;
-			let lo = Infinity;
-			for (let j = i - kPeriod + 1; j <= i; j++) {
-				hi = Math.max(hi, bars[j].high);
-				lo = Math.min(lo, bars[j].low);
-			}
-			const range = hi - lo;
-			rsv.push({
-				time: bars[i].time,
-				value: range === 0 ? 50 : (bars[i].close - lo) / range * 100
-			});
-		}
-		const k = smaOf(rsv, kSmooth);
-		return {
-			k,
-			d: smaOf(k, dPeriod)
-		};
-	}
-	function smaOf(points, period) {
-		const out = [];
-		let sum = 0;
-		const vals = [];
-		for (const p of points) {
-			if (p.value === void 0) continue;
-			vals.push(p.value);
-			sum += p.value;
-			if (vals.length > period) sum -= vals[vals.length - period - 1];
-			if (vals.length >= period) out.push({
-				time: p.time,
-				value: sum / period
-			});
-		}
-		return out;
 	}
 	//#endregion
 	//#region src/lib/intraday-session.ts
@@ -807,6 +629,186 @@
 		return lastLabel !== null && lastLabel !== void 0 && lastLabel >= tfBucket(t, tf) - tf * 60;
 	}
 	//#endregion
+	//#region src/lib/indicators.ts
+	function ema(bars, period) {
+		return emaOf(bars.map((b) => ({
+			time: b.time,
+			value: b.close
+		})), period);
+	}
+	function emaOf(points, period) {
+		const out = [];
+		const k = 2 / (period + 1);
+		let prev = null;
+		let seedSum = 0;
+		let seedCount = 0;
+		for (const p of points) {
+			if (p.value === void 0) continue;
+			if (prev === null) {
+				seedSum += p.value;
+				seedCount += 1;
+				if (seedCount === period) {
+					prev = seedSum / period;
+					out.push({
+						time: p.time,
+						value: prev
+					});
+				}
+				continue;
+			}
+			prev = p.value * k + prev * (1 - k);
+			out.push({
+				time: p.time,
+				value: prev
+			});
+		}
+		return out;
+	}
+	function trueRanges(bars) {
+		const tr = [];
+		for (let i = 0; i < bars.length; i++) {
+			const b = bars[i];
+			if (i === 0) {
+				tr.push(b.high - b.low);
+				continue;
+			}
+			const pc = bars[i - 1].close;
+			tr.push(Math.max(b.high - b.low, Math.abs(b.high - pc), Math.abs(b.low - pc)));
+		}
+		return tr;
+	}
+	function rma(values, period) {
+		const out = [];
+		let prev = null;
+		let seed = 0;
+		for (let i = 0; i < values.length; i++) {
+			if (prev === null) {
+				seed += values[i];
+				if (i === period - 1) {
+					prev = seed / period;
+					out.push(prev);
+				} else out.push(void 0);
+				continue;
+			}
+			prev = (prev * (period - 1) + values[i]) / period;
+			out.push(prev);
+		}
+		return out;
+	}
+	function atr(bars, period = 14) {
+		const smoothed = rma(trueRanges(bars), period);
+		const out = [];
+		for (let i = 0; i < bars.length; i++) {
+			const v = smoothed[i];
+			if (v !== void 0) out.push({
+				time: bars[i].time,
+				value: v
+			});
+		}
+		return out;
+	}
+	function supertrend(bars, period = 10, mult = 3) {
+		const atrLine = rma(trueRanges(bars), period);
+		const up = [];
+		const down = [];
+		let prevUpper = NaN;
+		let prevLower = NaN;
+		let trendUp = true;
+		let prevClose = NaN;
+		for (let i = 0; i < bars.length; i++) {
+			const b = bars[i];
+			const a = atrLine[i];
+			if (a === void 0) {
+				up.push({ time: b.time });
+				down.push({ time: b.time });
+				prevClose = b.close;
+				continue;
+			}
+			const mid = (b.high + b.low) / 2;
+			let upper = mid + mult * a;
+			let lower = mid - mult * a;
+			if (!Number.isNaN(prevUpper) && !(upper < prevUpper || prevClose > prevUpper)) upper = prevUpper;
+			if (!Number.isNaN(prevLower) && !(lower > prevLower || prevClose < prevLower)) lower = prevLower;
+			if (trendUp && b.close < lower) trendUp = false;
+			else if (!trendUp && b.close > upper) trendUp = true;
+			up.push(trendUp ? {
+				time: b.time,
+				value: lower
+			} : { time: b.time });
+			down.push(trendUp ? { time: b.time } : {
+				time: b.time,
+				value: upper
+			});
+			prevUpper = upper;
+			prevLower = lower;
+			prevClose = b.close;
+		}
+		return {
+			up,
+			down
+		};
+	}
+	function rsi(bars, period = 14) {
+		const gains = [];
+		const losses = [];
+		for (let i = 1; i < bars.length; i++) {
+			const chg = bars[i].close - bars[i - 1].close;
+			gains.push(Math.max(0, chg));
+			losses.push(Math.max(0, -chg));
+		}
+		const avgG = rma(gains, period);
+		const avgL = rma(losses, period);
+		const out = [];
+		for (let i = 0; i < gains.length; i++) {
+			const g = avgG[i];
+			const l = avgL[i];
+			if (g === void 0 || l === void 0) continue;
+			const v = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+			out.push({
+				time: bars[i + 1].time,
+				value: v
+			});
+		}
+		return out;
+	}
+	function stoch(bars, kPeriod = 9, kSmooth = 3, dPeriod = 3) {
+		const rsv = [];
+		for (let i = kPeriod - 1; i < bars.length; i++) {
+			let hi = -Infinity;
+			let lo = Infinity;
+			for (let j = i - kPeriod + 1; j <= i; j++) {
+				hi = Math.max(hi, bars[j].high);
+				lo = Math.min(lo, bars[j].low);
+			}
+			const range = hi - lo;
+			rsv.push({
+				time: bars[i].time,
+				value: range === 0 ? 50 : (bars[i].close - lo) / range * 100
+			});
+		}
+		const k = smaOf(rsv, kSmooth);
+		return {
+			k,
+			d: smaOf(k, dPeriod)
+		};
+	}
+	function smaOf(points, period) {
+		const out = [];
+		let sum = 0;
+		const vals = [];
+		for (const p of points) {
+			if (p.value === void 0) continue;
+			vals.push(p.value);
+			sum += p.value;
+			if (vals.length > period) sum -= vals[vals.length - period - 1];
+			if (vals.length >= period) out.push({
+				time: p.time,
+				value: sum / period
+			});
+		}
+		return out;
+	}
+	//#endregion
 	//#region src/lib/trend-signal/risk/plan.ts
 	function decimalsOf(tick) {
 		const s = String(tick);
@@ -1012,7 +1014,7 @@
 	}
 	//#endregion
 	//#region src/lib/trend-signal/risk/virtual.ts
-	function exitText(reason) {
+	function exitText$1(reason) {
 		switch (reason) {
 			case "STOP": return "初始停損";
 			case "BREAKEVEN_STOP": return "保本停損";
@@ -1035,7 +1037,7 @@
 		const trendLabel = inp.clock?.trendLabel ?? "5m";
 		const clockText = baseLabel.startsWith("1D") ? wallTime : wallHm;
 		const when = (t, at) => inp.clock ? at === "open" ? `${clockText(openTime(t))} ${baseLabel}開盤` : `${clockText(openTime(t))}–${clockText(t)} ${baseLabel}棒內` : fillWhen(t, at);
-		const reasonText = (reason) => exitText(reason).replace("5m", trendLabel);
+		const reasonText = (reason) => exitText$1(reason).replace("5m", trendLabel);
 		const slip = cfg.slipTicks * tick;
 		const atr1 = alignPoints(m1, atr(m1, 14));
 		const atr5 = alignPoints(m5.bars, atr(m5.bars, 14));
@@ -2240,6 +2242,68 @@
 		return out;
 	}
 	//#endregion
+	//#region src/lib/trend-signal/app-plot-style.ts
+	var LEVELS = new Set([
+		"初始停損",
+		"目前停損",
+		"保本價",
+		"1R",
+		"2R",
+		"3R"
+	]);
+	var exitPlot = (reason) => reason === "TP2R" ? "虛擬2R出場" : reason === "TP3R" ? "虛擬3R出場" : reason === "REVERSAL" || reason === "TREND_INVALID" ? "虛擬反轉失效出場" : "虛擬停損出場";
+	var exitText = (side, reason) => {
+		switch (reason) {
+			case "STOP": return `${side} 停損出場`;
+			case "BREAKEVEN_STOP": return `${side} 保本停損出場`;
+			case "TRAIL_STOP": return `${side} 移動停損出場`;
+			case "TP2R": return `${side} 2R 出場`;
+			case "TP3R": return `${side} 3R 出場`;
+			case "REVERSAL": return `${side} 反轉出場`;
+			case "TREND_INVALID": return `${side} 反轉失效出場`;
+		}
+	};
+	/** TSP App plot 樣式與 marker metadata；marker 只投影到既有且有值的輸出點。 */
+	function appTspPlotHints(outputs, chartTimes, result, mode, riskHistory) {
+		const markers = Object.fromEntries(CUSTOM_TSP_PLOTS.map(([key]) => [key, new Array(chartTimes.length).fill(null)]));
+		const indexes = /* @__PURE__ */ new Map();
+		chartTimes.forEach((time, i) => indexes.set(time, [...indexes.get(time) ?? [], i]));
+		const put = (key, time, marker) => {
+			for (const i of indexes.get(time) ?? []) if (typeof outputs[key]?.[i] === "number" && Number.isFinite(outputs[key][i])) markers[key][i] = {
+				side: marker.side,
+				text: marker.text
+			};
+		};
+		if (result && mode !== "aux") {
+			for (const signal of result.signals) {
+				const side = signal.kind === "BUY" ? "Buy" : "Sell";
+				put(signal.kind, signal.barTime, {
+					side,
+					text: `${side} 趨勢`
+				});
+			}
+			for (const trade of result.trades) {
+				const side = trade.direction === "LONG" ? "Sell" : "Buy";
+				const entrySide = trade.direction === "LONG" ? "Buy" : "Sell";
+				put(trade.direction === "LONG" ? "虛擬進場多" : "虛擬進場空", trade.fillTime, {
+					side: entrySide,
+					text: `${entrySide} 進場`
+				});
+				for (const fill of trade.fills) put(exitPlot(fill.reason), fill.time, {
+					side,
+					text: exitText(side, fill.reason)
+				});
+			}
+		}
+		return Object.fromEntries(CUSTOM_TSP_PLOTS.map(([key, color]) => [key, {
+			color,
+			kind: key.endsWith("趨勢線") ? "line" : LEVELS.has(key) ? riskHistory ? "points" : "dashed" : "points",
+			...key === "目前停損" && !riskHistory ? { plot: "step" } : {},
+			width: key === "目前停損" || key.endsWith("趨勢線") ? 2 : 1,
+			markers: markers[key]
+		}]));
+	}
+	//#endregion
 	//#region src/lib/trend-signal/chart-custom.ts
 	var CHART_TSP_VERSION = "tsp-chart-1.2.0";
 	var DAY = 86400;
@@ -2437,14 +2501,6 @@
 	//#endregion
 	//#region src/lib/trend-signal/app-custom.ts
 	var APP_TSP_PLOTS = CUSTOM_TSP_PLOTS;
-	var LEVELS = new Set([
-		"初始停損",
-		"目前停損",
-		"保本價",
-		"1R",
-		"2R",
-		"3R"
-	]);
 	var empty = (n) => Object.fromEntries(APP_TSP_PLOTS.map(([k]) => [k, new Array(n).fill(null)]));
 	/** 5m 主圖的微型趨勢與主趨勢算在同一組 5m K 棒上：沿用 1m 主圖的預設會與主趨勢完全相同、MICRO_TREND 永遠不提示。
 	*  改用較靈敏的預設（只依提示頻率選定，研究結果 7.3）；使用者在 App 宣告了該參數就照用 */
@@ -2503,11 +2559,7 @@
 			keepLastChartSegment(outputs, frame, res.t5.dir, mapped);
 			result = res;
 		}
-		const hints = Object.fromEntries(APP_TSP_PLOTS.map(([key, color]) => [key, {
-			color,
-			kind: key.endsWith("趨勢線") ? "line" : LEVELS.has(key) && !riskHistory ? "line" : "points",
-			width: key === "目前停損" || key.endsWith("趨勢線") ? 2 : 1
-		}]));
+		const hints = appTspPlotHints(outputs, bars.time, result, mode, riskHistory);
 		return {
 			mode,
 			result,

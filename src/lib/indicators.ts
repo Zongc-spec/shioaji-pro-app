@@ -4,9 +4,15 @@
 
 import type { Candle } from './types/market';
 
+export interface IndicatorMarker {
+    side: 'Buy' | 'Sell';
+    text: string;
+}
+
 export interface IndicatorPoint {
     time: number;
     value?: number;
+    marker?: IndicatorMarker;
     /** 此點起到下一點的線段顏色（例：transparent 讓折線在此斷開）；缺省用輸出樣式 */
     color?: string;
 }

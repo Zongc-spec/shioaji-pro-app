@@ -80,6 +80,7 @@ if (params.get('custom') === '1' || only === 'custom') {
             kind: probe.hints[key]?.kind ?? 'line',
             color: probe.hints[key]?.color ?? CUSTOM_PALETTE[i % CUSTOM_PALETTE.length]!,
             ...(probe.hints[key]?.width ? { width: probe.hints[key].width } : {}),
+            ...(probe.hints[key]?.plot ? { plot: probe.hints[key].plot } : {}),
             ...(stopStep && key === '目前停損' ? { plot: 'step' as const } : {}),
         })),
         source: customSource,

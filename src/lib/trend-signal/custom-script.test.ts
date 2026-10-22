@@ -224,7 +224,7 @@ describe('單檔的顯示與錯誤界線', () => {
         const app = script(m1, params, closedAt);
         const open = res.snapshot.trade?.status === 'OPEN' ? res.snapshot.trade : null;
         for (const key of LEVELS) {
-            expect(app.hints[key]?.kind).toBe('line');
+            expect(app.hints[key]?.kind).toBe('dashed');
             m1.forEach((b, i) => { if (!open || b.time < open.fillTime) expect(app.outputs[key]![i]).toBeNull(); });
         }
         const history = script(m1, { ...params, riskHistory: 1 }, closedAt);
