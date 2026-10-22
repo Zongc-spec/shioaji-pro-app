@@ -6,54 +6,24 @@
 //   npx vitest run --config "$PWD/$D/vitest.config.mjs" --root "$D" trend-candidates
 //
 // CSV 的 datetime 為台灣時間的 1m 收盤 label。資料不進 repo。
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { atr, supertrend } from '../../../src/lib/indicators';
-import { aggregate, wallClockToUtc } from '../../../src/lib/utils/kbars';
+import { aggregate } from '../../../src/lib/utils/kbars';
 import { tradingSessionOf } from '../../../src/lib/trend-signal/core/session';
 import { alignPoints } from '../../../src/lib/trend-signal/core/bars';
 import { ALGORITHMS, kamaLine } from '../../../src/lib/trend-signal/trend/algorithms';
 import { configFromParams } from '../../../src/lib/trend-signal/config';
 import type { TrendParams } from '../../../src/lib/trend-signal/types';
 import type { Candle } from '../../../src/lib/types/market';
+import {
+    PERIOD_LIST, PERIODS, T, WARMUP, check, choppiness, closes, dmi, efficiency, emaArr, envelopes, fmt, hh, ll, loadCsv, loadSpliced,
+    median, pct, productDir, props, propsByPeriod, referenceSet, rolling, stDir, swingDir, withWarmup, type State,
+} from './trend-lib';
 
 const CSV = process.env.TSP_CHAR_CSV ?? '';
 const FRESH_CSV = process.env.TSP_FRESH_CSV ?? '';
 const OUT = process.env.TSP_CHAR_OUT ?? tmpdir();
-const T = wallClockToUtc;
-const SPLICE = T('2026-08-25T00:00:00');
-const PERIODS = {
-    IS: [T('2024-09-01T00:00:00'), T('2025-08-31T23:59:59')],
-    OOS: [T('2025-09-01T00:00:00'), T('2026-09-01T23:59:59')],
-    FRESH: [T('2026-09-02T00:00:00'), T('2026-10-21T23:59:59')],
-} as const;
-type Period = keyof typeof PERIODS;
-const WARMUP = 150; // 新候選一律 150 根 5m（同 A、B 的預設暖身）
-
-type State = 1 | -1 | 0 | null; // LONG／SHORT／NEUTRAL／未知
-
-function loadCsv(path: string, from = -Infinity, to = Infinity): Candle[] {
-    const out: Candle[] = [];
-    const lines = readFileSync(path, 'utf8').split('\n');
-    for (let k = 1; k < lines.length; k++) {
-        const line = lines[k];
-        if (!line) continue;
-        const [dt, o, h, l, c, v] = line.split(',');
-        const t = T(dt!);
-        if (t < from || t > to) continue;
-        out.push({ time: t, open: +o!, high: +h!, low: +l!, close: +c!, volume: +v! });
-    }
-    return out;
-}
-
-const median = (xs: number[]) => {
-    if (!xs.length) return NaN;
-    const s = [...xs].sort((a, b) => a - b);
-    const m = s.length >> 1;
-    return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
-};
-const pct = (n: number, d: number) => (d ? (100 * n) / d : NaN);
-
 // ---- 結果 1 的指標（逐字沿用 characterize.char.ts，只用於重現性檢查）----
 
 interface Ev { i: number; d: 1 | -1 }
@@ -108,143 +78,6 @@ function r1Metrics(b: Candle[], ev: Ev[], a14: (number | undefined)[], days: num
     return [n / days, pct(w3, n), pct(w6, n), median(seg), median(lag), median(give), median(mfe), pct(over1, mfeN)];
 }
 
-// ---- 結果 9 的指標（事前規則 9.0）----
-
-interface Props { n: number; perDay: number; fail3: number; fail6: number; lag: number; seg: number }
-
-function props(S: State[], b: Candle[], from: number, to: number, days: number): Props {
-    let n = 0, f3 = 0, f6 = 0;
-    const lag: number[] = [];
-    const seg: number[] = [];
-    let lastChange = -1; // 上一次狀態改變（兩側皆已知）的根
-    for (let j = 1; j < S.length; j++) {
-        const a = S[j - 1];
-        const c = S[j];
-        if (a === null || c === null || a === c) continue;
-        const t = b[j]!.time;
-        if ((c === 1 || c === -1) && t >= from && t <= to) {
-            n++;
-            let leave = -1;
-            for (let k = j + 1; k < S.length; k++) {
-                if (S[k] !== null && S[k] !== c) {
-                    leave = k;
-                    break;
-                }
-            }
-            if (leave >= 0) {
-                if (leave - j <= 3) f3++;
-                if (leave - j <= 6) f6++;
-                seg.push(leave - j);
-            }
-            if (lastChange >= 0) {
-                let ie = lastChange + 1;
-                for (let k = lastChange + 1; k <= j; k++) if (c === 1 ? b[k]!.low < b[ie]!.low : b[k]!.high > b[ie]!.high) ie = k;
-                lag.push(j - ie);
-            }
-        }
-        lastChange = j;
-    }
-    return { n, perDay: n / days, fail3: pct(f3, n), fail6: pct(f6, n), lag: median(lag), seg: median(seg) };
-}
-
-// 下包絡：Pareto 點（沒有其他點延遲不更長、失效不更高），相鄰點線性內插；範圍外為 undefined
-function envelope(points: { lag: number; v: number }[]) {
-    const sorted = [...points].sort((x, y) => x.lag - y.lag || x.v - y.v);
-    const front: { lag: number; v: number }[] = [];
-    for (const p of sorted) {
-        const last = front.at(-1);
-        if (last && last.lag === p.lag) continue;
-        if (!last || p.v < last.v) front.push(p);
-    }
-    const at = (lag: number): number | undefined => {
-        if (!front.length || lag < front[0]!.lag || lag > front.at(-1)!.lag) return undefined;
-        for (let k = 0; k < front.length; k++) {
-            const p = front[k]!;
-            if (p.lag === lag) return p.v;
-            const q = front[k + 1];
-            if (q && lag > p.lag && lag < q.lag) return p.v + ((lag - p.lag) / (q.lag - p.lag)) * (q.v - p.v);
-        }
-        return undefined;
-    };
-    return { front, at };
-}
-
-// ---- 共用工具 ----
-
-const closes = (b: Candle[]) => b.map((x) => x.close);
-function emaArr(xs: (number | undefined)[], n: number): (number | undefined)[] {
-    const k = 2 / (n + 1);
-    const out: (number | undefined)[] = new Array(xs.length);
-    let e: number | undefined;
-    for (let i = 0; i < xs.length; i++) {
-        const x = xs[i];
-        if (x === undefined) {
-            out[i] = undefined;
-            continue;
-        }
-        e = e === undefined ? x : e + k * (x - e);
-        out[i] = e;
-    }
-    return out;
-}
-function rma(xs: number[], n: number): (number | undefined)[] {
-    const out: (number | undefined)[] = new Array(xs.length);
-    let s = 0;
-    let r: number | undefined;
-    for (let i = 0; i < xs.length; i++) {
-        if (i < n) {
-            s += xs[i]!;
-            out[i] = i === n - 1 ? (r = s / n) : undefined;
-            continue;
-        }
-        r = r! + (xs[i]! - r!) / n;
-        out[i] = r;
-    }
-    return out;
-}
-const trueRange = (b: Candle[]) => b.map((x, i) => (i === 0 ? x.high - x.low
-    : Math.max(x.high - x.low, Math.abs(x.high - b[i - 1]!.close), Math.abs(x.low - b[i - 1]!.close))));
-
-function withWarmup(dir: State[]): State[] {
-    return dir.map((d, i) => (i < WARMUP ? null : d));
-}
-
-/** 產品 KAMA 的擺動遲滯：線從高點回落（低點回升）h × ATR14 才翻轉；第一個可用點以線的走向決定初始方向 */
-function swingDir(line: (number | undefined)[], a14: (number | undefined)[], h: number): State[] {
-    const dir: State[] = new Array(line.length);
-    let d: 1 | -1 | 0 = 0;
-    let hi = 0;
-    let lo = 0;
-    for (let i = 0; i < line.length; i++) {
-        const k = line[i];
-        const av = a14[i];
-        if (k === undefined || av === undefined) {
-            dir[i] = null;
-            continue;
-        }
-        if (d === 0) {
-            const prev = i > 0 ? line[i - 1] : undefined;
-            d = prev !== undefined && k < prev ? -1 : 1;
-            hi = lo = k;
-        } else if (d === 1) {
-            hi = Math.max(hi, k);
-            if (k < hi - h * av) {
-                d = -1;
-                lo = k;
-            }
-        } else {
-            lo = Math.min(lo, k);
-            if (k > lo + h * av) {
-                d = 1;
-                hi = k;
-            }
-        }
-        dir[i] = d;
-    }
-    return dir;
-}
-
-/** 通道突破：收盤 > 上軌轉 LONG、< 下軌轉 SHORT，其餘維持；第一次突破前未知 */
 function bandBreak(b: Candle[], up: (number | undefined)[], lo: (number | undefined)[]): State[] {
     let d: State = null;
     return b.map((x, i) => {
@@ -266,17 +99,6 @@ function crossDir(a: (number | undefined)[], c: (number | undefined)[]): State[]
         return d;
     });
 }
-
-function stDir(b: Candle[], p: number, m: number): State[] {
-    const r = supertrend(b, p, m);
-    return b.map((_, i) => (r.up[i]?.value !== undefined ? 1 : r.down[i]?.value !== undefined ? -1 : null));
-}
-
-function rolling(b: Candle[], n: number, f: (w: Candle[]) => number): (number | undefined)[] {
-    return b.map((_, i) => (i < n - 1 ? undefined : f(b.slice(i - n + 1, i + 1))));
-}
-const hh = (w: Candle[]) => Math.max(...w.map((x) => x.high));
-const ll = (w: Candle[]) => Math.min(...w.map((x) => x.low));
 
 // ---- 候選 ----
 
@@ -301,35 +123,6 @@ function ichimokuTk(b: Candle[]): State[] {
     const tenkan = rolling(b, 9, (w) => (hh(w) + ll(w)) / 2);
     const kijun = rolling(b, 26, (w) => (hh(w) + ll(w)) / 2);
     return crossDir(tenkan, kijun);
-}
-
-function dmi(b: Candle[], n = 14) {
-    const plus = b.map((x, i) => {
-        if (i === 0) return 0;
-        const up = x.high - b[i - 1]!.high;
-        const dn = b[i - 1]!.low - x.low;
-        return up > dn && up > 0 ? up : 0;
-    });
-    const minus = b.map((x, i) => {
-        if (i === 0) return 0;
-        const up = x.high - b[i - 1]!.high;
-        const dn = b[i - 1]!.low - x.low;
-        return dn > up && dn > 0 ? dn : 0;
-    });
-    const tr = rma(trueRange(b), n);
-    const sp = rma(plus, n);
-    const sm = rma(minus, n);
-    const pdi = b.map((_, i) => (tr[i] ? (100 * sp[i]!) / tr[i]! : undefined));
-    const mdi = b.map((_, i) => (tr[i] ? (100 * sm[i]!) / tr[i]! : undefined));
-    const dx = b.map((_, i) => {
-        const p = pdi[i];
-        const m = mdi[i];
-        return p === undefined || m === undefined || p + m === 0 ? 0 : (100 * Math.abs(p - m)) / (p + m);
-    });
-    const first = pdi.findIndex((x) => x !== undefined);
-    const adxTail = rma(dx.slice(first), n);
-    const adx = b.map((_, i) => (i < first ? undefined : adxTail[i - first]));
-    return { pdi, mdi, adx };
 }
 
 function zlema(b: Candle[], n = 20): (number | undefined)[] {
@@ -376,27 +169,6 @@ function superSmoother(b: Candle[], n = 20): (number | undefined)[] {
         f.push(i < 2 ? x[i]! : (c1 * (x[i]! + x[i - 1]!)) / 2 + c2 * f[i - 1]! + c3 * f[i - 2]!);
     }
     return f;
-}
-
-function choppiness(b: Candle[], n = 14): (number | undefined)[] {
-    const tr = trueRange(b);
-    return b.map((_, i) => {
-        if (i < n) return undefined;
-        let s = 0;
-        for (let j = i - n + 1; j <= i; j++) s += tr[j]!;
-        const w = b.slice(i - n + 1, i + 1);
-        const range = hh(w) - ll(w);
-        return range > 0 ? (100 * Math.log10(s / range)) / Math.log10(n) : undefined;
-    });
-}
-
-function efficiency(b: Candle[], n = 10): (number | undefined)[] {
-    return b.map((x, i) => {
-        if (i < n) return undefined;
-        let vol = 0;
-        for (let j = i - n + 1; j <= i; j++) vol += Math.abs(b[j]!.close - b[j - 1]!.close);
-        return vol > 0 ? Math.abs(x.close - b[i - n]!.close) / vol : 0;
-    });
 }
 
 function gated(dir: State[], open: (boolean | undefined)[]): State[] {
@@ -469,13 +241,6 @@ function sessionSplit(b5: Candle[], m: number): State[] {
     return out;
 }
 
-function productDir(b5: Candle[], over: Partial<TrendParams>): State[] {
-    const p = { ...configFromParams({}).trend, ...over } as TrendParams;
-    const algo = ALGORITHMS[p.algo];
-    const warm = algo.warmup(p);
-    return algo.compute(b5, p).dir.map((d, i) => (i < warm ? null : d));
-}
-
 // ---- 主程式 ----
 
 test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯讀）', () => {
@@ -502,16 +267,8 @@ test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯�
     }
 
     // 資料：兩年 CSV（2026-08-25 之前）接新資料；重疊段逐欄相同
-    const old = loadCsv(CSV);
-    const fresh = loadCsv(FRESH_CSV);
-    const freshByTime = new Map(fresh.map((x) => [x.time, x]));
-    const overlap = old.filter((x) => x.time >= SPLICE && x.time < T('2026-09-01T16:22:00'));
-    for (const x of overlap) expect(freshByTime.get(x.time)).toEqual(x);
-    const m1 = [...old.filter((x) => x.time < SPLICE), ...fresh];
-    for (let i = 1; i < m1.length; i++) expect(m1[i]!.time).toBeGreaterThan(m1[i - 1]!.time);
-    const b5 = aggregate(m1, 5);
-    const a14 = alignPoints(b5, atr(b5, 14));
-    log.push(`資料：1m ${m1.length} 根（${new Date(m1[0]!.time * 1000).toISOString()} 起），重疊段 ${overlap.length} 根逐欄相同；5m ${b5.length} 根`);
+    const { m1, b5, a14, overlap, dayN } = loadSpliced(CSV, FRESH_CSV);
+    log.push(`資料：1m ${m1.length} 根（${new Date(m1[0]!.time * 1000).toISOString()} 起），重疊段 ${overlap} 根逐欄相同；5m ${b5.length} 根`);
 
     // 重現性檢查 2：產品 KAMA 的線＋腳本遲滯 = 產品 KAMA 方向
     const kp = { ...configFromParams({}).trend, algo: 'kama' } as TrendParams;
@@ -520,23 +277,7 @@ test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯�
     expect(mine).toEqual(prodKama);
     log.push('重現 KAMA：腳本遲滯與產品 KAMA 方向逐根相同');
 
-    const days = (p: Period) => new Set(m1.filter((x) => x.time >= PERIODS[p][0] && x.time <= PERIODS[p][1])
-        .map((x) => tradingSessionOf('FUT', x.time).key).filter((k) => k.endsWith('D'))).size;
-    const dayN = { IS: days('IS'), OOS: days('OOS'), FRESH: days('FRESH') };
-
-    const refs: [string, State[]][] = [
-        ['A SuperTrend(10,2)', productDir(b5, { algo: 'supertrend', stMult: 2 })],
-        ['A SuperTrend(10,3)', productDir(b5, { algo: 'supertrend', stMult: 3 })],
-        ['A SuperTrend(10,4)', productDir(b5, { algo: 'supertrend', stMult: 4 })],
-        ['B KAMA 遲滯 0.15', productDir(b5, { algo: 'kama', kamaHyst: 0.15 })],
-        ['B KAMA 遲滯 0.3', productDir(b5, { algo: 'kama', kamaHyst: 0.3 })],
-        ['B KAMA 遲滯 0.6', productDir(b5, { algo: 'kama', kamaHyst: 0.6 })],
-        ['C Donchian(10)+ATR×3', productDir(b5, { algo: 'donchian', dcLength: 10, dcAtrMult: 3 })],
-        ['C Donchian(20)+ATR×3', productDir(b5, { algo: 'donchian', dcLength: 20, dcAtrMult: 3 })],
-        ['C Donchian(40)+ATR×3', productDir(b5, { algo: 'donchian', dcLength: 40, dcAtrMult: 3 })],
-        ['C Donchian(20)+ATR×2', productDir(b5, { algo: 'donchian', dcLength: 20, dcAtrMult: 2 })],
-        ['C Donchian(20)+ATR×4', productDir(b5, { algo: 'donchian', dcLength: 20, dcAtrMult: 4 })],
-    ];
+    const refs = referenceSet(b5);
 
     const st = (m: number) => withWarmup(stDir(b5, 10, m));
     const { pdi, mdi, adx } = dmi(b5);
@@ -570,26 +311,17 @@ test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯�
         cands.push([`日夜盤分開 ST(10,${m})${tag}`, sessionSplit(b5, m), judged]);
     }
 
-    const periods: Period[] = ['IS', 'OOS', 'FRESH'];
-    const refRows = refs.map(([name, S]) => ({ name, p: Object.fromEntries(periods.map((p) => [p, props(S, b5, PERIODS[p][0], PERIODS[p][1], dayN[p])])) as Record<Period, Props> }));
-    const env = Object.fromEntries(periods.map((p) => [p, {
-        f3: envelope(refRows.map((r) => ({ lag: r.p[p].lag, v: r.p[p].fail3 }))),
-        f6: envelope(refRows.map((r) => ({ lag: r.p[p].lag, v: r.p[p].fail6 }))),
-    }])) as Record<Period, { f3: ReturnType<typeof envelope>; f6: ReturnType<typeof envelope> }>;
+    const periods = PERIOD_LIST;
+    const refRows = refs.map(([name, S]) => ({ name, p: propsByPeriod(S, b5, dayN) }));
+    const env = envelopes(refRows);
 
     const candRows = cands.map(([name, S, judged]) => {
-        const p = Object.fromEntries(periods.map((q) => [q, props(S, b5, PERIODS[q][0], PERIODS[q][1], dayN[q])])) as Record<Period, Props>;
-        const checks = periods.map((q) => {
-            const e3 = env[q].f3.at(p[q].lag);
-            const e6 = env[q].f6.at(p[q].lag);
-            if (e3 === undefined || e6 === undefined) return { q, e3, e6, ok: false, why: '延遲在範圍外' };
-            const ok = q === 'FRESH' ? p[q].fail3 < e3 : p[q].fail3 <= 0.8 * e3 && p[q].fail6 <= e6;
-            return { q, e3, e6, ok, why: '' };
-        });
+        const p = propsByPeriod(S, b5, dayN);
+        const checks = periods.map((q) => check(q, p[q], env[q]));
         return { name, judged, p, checks, pass: judged && checks.every((c) => c.ok) };
     });
 
-    const f = (x: number | undefined, d = 1) => (x === undefined || Number.isNaN(x) ? '—' : x.toFixed(d));
+    const f = fmt;
     let md = '# 結果 9 第一階段：趨勢演算法候選\n\n';
     md += `${log.join('\n\n')}\n\n日盤交易日：IS ${dayN.IS}、OOS ${dayN.OOS}、FRESH ${dayN.FRESH}\n\n`;
     for (const q of periods) {
