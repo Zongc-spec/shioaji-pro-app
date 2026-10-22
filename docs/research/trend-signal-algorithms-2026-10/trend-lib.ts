@@ -36,22 +36,31 @@ export function loadCsv(path: string, from = -Infinity, to = Infinity): Candle[]
     return out;
 }
 
-/** 兩年 CSV（2026-08-25 之前）接新資料；重疊段須逐欄相同、時間嚴格遞增（不符就丟錯） */
+/** 兩年 CSV（2026-08-25 之前）接新資料；舊 CSV 在重疊段的每一根都須在新資料裡且逐欄相同、時間嚴格遞增（不符就丟錯）。
+ *  新資料在重疊段多出的根（舊 CSV 缺每月 31 日）以 freshOnly 回報。 */
 export function loadSpliced(csv: string, freshCsv: string) {
     const old = loadCsv(csv);
     const fresh = loadCsv(freshCsv);
     const freshByTime = new Map(fresh.map((x) => [x.time, x]));
-    const overlap = old.filter((x) => x.time >= SPLICE && x.time < T('2026-09-01T16:22:00'));
-    for (const x of overlap) expect(freshByTime.get(x.time)).toEqual(x);
+    const overlapEnd = T('2026-09-01T16:22:00');
+    const overlap = old.filter((x) => x.time >= SPLICE && x.time < overlapEnd);
+    const same = (a: Candle, b: Candle | undefined) => !!b && a.open === b.open && a.high === b.high && a.low === b.low
+        && a.close === b.close && a.volume === b.volume;
+    for (const x of overlap) if (!same(x, freshByTime.get(x.time))) throw new Error(`重疊段 ${x.time} 與新資料不同`);
+    const oldTimes = new Set(overlap.map((x) => x.time));
+    const freshOnly = fresh.filter((x) => x.time >= SPLICE && x.time < overlapEnd && !oldTimes.has(x.time)).length;
     const m1 = [...old.filter((x) => x.time < SPLICE), ...fresh];
-    for (let i = 1; i < m1.length; i++) expect(m1[i]!.time).toBeGreaterThan(m1[i - 1]!.time);
+    for (let i = 1; i < m1.length; i++) if (m1[i]!.time <= m1[i - 1]!.time) throw new Error(`時間未遞增：${m1[i]!.time}`);
     const b5 = aggregate(m1, 5);
     const a14 = alignPoints(b5, atr(b5, 14));
     const days = (p: Period) => new Set(m1.filter((x) => x.time >= PERIODS[p][0] && x.time <= PERIODS[p][1])
         .map((x) => tradingSessionOf('FUT', x.time).key).filter((k) => k.endsWith('D'))).size;
     const dayN = { IS: days('IS'), OOS: days('OOS'), FRESH: days('FRESH') } as Record<Period, number>;
-    return { m1, b5, a14, overlap: overlap.length, dayN };
+    return { m1, b5, a14, overlap: overlap.length, freshOnly, dayN };
 }
+
+/** 5m K 棒（收盤 label）的時段：用桶內第一根 1m（label − 4 分）判定 */
+export const session5 = (label: number) => tradingSessionOf('FUT', label - 240);
 
 export const median = (xs: number[]) => {
     if (!xs.length) return NaN;
@@ -63,10 +72,11 @@ export const pct = (n: number, d: number) => (d ? (100 * n) / d : NaN);
 
 // ---- 指標性質（事前規則 9.0）----
 
-export interface Props { n: number; perDay: number; fail3: number; fail6: number; lag: number; seg: number }
+/** n＝訊號數；observed＝之後還有 6 根可觀察的訊號（失效率的分母，資料尾端右設限的不算） */
+export interface Props { n: number; observed: number; perDay: number; fail3: number; fail6: number; lag: number; seg: number }
 
 export function props(S: State[], b: Candle[], from: number, to: number, days: number): Props {
-    let n = 0, f3 = 0, f6 = 0;
+    let n = 0, observed = 0, f3 = 0, f6 = 0;
     const lag: number[] = [];
     const seg: number[] = [];
     let lastChange = -1; // 上一次狀態改變（兩側皆已知）的根
@@ -77,6 +87,7 @@ export function props(S: State[], b: Candle[], from: number, to: number, days: n
         const t = b[j]!.time;
         if ((c === 1 || c === -1) && t >= from && t <= to) {
             n++;
+            if (j + 6 < S.length) observed++;
             let leave = -1;
             for (let k = j + 1; k < S.length; k++) {
                 if (S[k] !== null && S[k] !== c) {
@@ -85,8 +96,8 @@ export function props(S: State[], b: Candle[], from: number, to: number, days: n
                 }
             }
             if (leave >= 0) {
-                if (leave - j <= 3) f3++;
-                if (leave - j <= 6) f6++;
+                if (leave - j <= 3 && j + 6 < S.length) f3++;
+                if (leave - j <= 6 && j + 6 < S.length) f6++;
                 seg.push(leave - j);
             }
             if (lastChange >= 0) {
@@ -97,7 +108,7 @@ export function props(S: State[], b: Candle[], from: number, to: number, days: n
         }
         lastChange = j;
     }
-    return { n, perDay: n / days, fail3: pct(f3, n), fail6: pct(f6, n), lag: median(lag), seg: median(seg) };
+    return { n, observed, perDay: n / days, fail3: pct(f3, observed), fail6: pct(f6, observed), lag: median(lag), seg: median(seg) };
 }
 
 // 下包絡：Pareto 點（沒有其他點延遲不更長、失效不更高），相鄰點線性內插；範圍外為 undefined
@@ -162,8 +173,8 @@ export function envelopes(refRows: { p: Record<Period, Props> }[]): Record<Perio
 export function check(q: Period, p: Props, env: { f3: Envelope; f6: Envelope }) {
     const e3 = env.f3.at(p.lag);
     const e6 = env.f6.at(p.lag);
-    if (e3 === undefined || e6 === undefined) return { q, e3, e6, ok: false, why: '延遲在範圍外' };
-    const ok = q === 'FRESH' ? p.fail3 < e3 : p.fail3 <= 0.8 * e3 && p.fail6 <= e6;
+    if (e3 === undefined || (q !== 'FRESH' && e6 === undefined)) return { q, e3, e6, ok: false, why: '延遲在範圍外' };
+    const ok = q === 'FRESH' ? p.fail3 < e3 : p.fail3 <= 0.8 * e3 && p.fail6 <= e6!;
     return { q, e3, e6, ok, why: '' };
 }
 
@@ -269,8 +280,9 @@ export function dmi(b: Candle[], n = 14) {
     const tr = rma(trueRange(b), n);
     const sp = rma(plus, n);
     const sm = rma(minus, n);
-    const pdi = b.map((_, i) => (tr[i] ? (100 * sp[i]!) / tr[i]! : undefined));
-    const mdi = b.map((_, i) => (tr[i] ? (100 * sm[i]!) / tr[i]! : undefined));
+    const di = (s: (number | undefined)[], i: number) => (tr[i] === undefined ? undefined : tr[i]! > 0 ? (100 * s[i]!) / tr[i]! : 0);
+    const pdi = b.map((_, i) => di(sp, i));
+    const mdi = b.map((_, i) => di(sm, i));
     const dx = b.map((_, i) => {
         const p = pdi[i];
         const m = mdi[i];
@@ -301,6 +313,21 @@ export function efficiency(b: Candle[], n = 10): (number | undefined)[] {
         for (let j = i - n + 1; j <= i; j++) vol += Math.abs(b[j]!.close - b[j - 1]!.close);
         return vol > 0 ? Math.abs(x.close - b[i - n]!.close) / vol : 0;
     });
+}
+
+/** 判斷打開時輸出核心方向，關閉時 NEUTRAL */
+export function gated(dir: State[], open: (boolean | undefined)[]): State[] {
+    return dir.map((d, i) => (d === null || open[i] === undefined ? null : open[i] ? d : 0));
+}
+
+/** 收盤的滾動平均與母體標準差（Bollinger 用） */
+export function closeMeanSd(b: Candle[], n = 20) {
+    const mean = rolling(b, n, (w) => w.reduce((s, x) => s + x.close, 0) / w.length);
+    const sd = rolling(b, n, (w) => {
+        const m = w.reduce((s, x) => s + x.close, 0) / w.length;
+        return Math.sqrt(w.reduce((s, x) => s + (x.close - m) ** 2, 0) / w.length);
+    });
+    return { mean, sd };
 }
 
 export const fmt = (x: number | undefined, d = 1) => (x === undefined || Number.isNaN(x) ? '—' : x.toFixed(d));

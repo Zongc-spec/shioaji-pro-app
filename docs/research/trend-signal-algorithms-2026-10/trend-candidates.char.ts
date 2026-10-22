@@ -17,8 +17,8 @@ import { configFromParams } from '../../../src/lib/trend-signal/config';
 import type { TrendParams } from '../../../src/lib/trend-signal/types';
 import type { Candle } from '../../../src/lib/types/market';
 import {
-    PERIOD_LIST, PERIODS, T, WARMUP, check, choppiness, closes, dmi, efficiency, emaArr, envelopes, fmt, hh, ll, loadCsv, loadSpliced,
-    median, pct, productDir, props, propsByPeriod, referenceSet, rolling, stDir, swingDir, withWarmup, type State,
+    PERIOD_LIST, PERIODS, T, check, choppiness, closeMeanSd, closes, dmi, efficiency, emaArr, envelopes, fmt, gated, hh, ll, loadCsv, loadSpliced,
+    median, pct, productDir, props, propsByPeriod, referenceSet, rolling, session5, stDir, swingDir, withWarmup, type State,
 } from './trend-lib';
 
 const CSV = process.env.TSP_CHAR_CSV ?? '';
@@ -110,13 +110,9 @@ function keltner(b: Candle[]): State[] {
 }
 
 function bollinger(b: Candle[]): State[] {
-    const stats = rolling(b, 20, (w) => {
-        const m = w.reduce((s, x) => s + x.close, 0) / w.length;
-        return Math.sqrt(w.reduce((s, x) => s + (x.close - m) ** 2, 0) / w.length);
-    });
-    const mean = rolling(b, 20, (w) => w.reduce((s, x) => s + x.close, 0) / w.length);
-    return bandBreak(b, mean.map((m, i) => (m === undefined ? undefined : m + 2 * stats[i]!)),
-        mean.map((m, i) => (m === undefined ? undefined : m - 2 * stats[i]!)));
+    const { mean, sd } = closeMeanSd(b);
+    return bandBreak(b, mean.map((m, i) => (m === undefined ? undefined : m + 2 * sd[i]!)),
+        mean.map((m, i) => (m === undefined ? undefined : m - 2 * sd[i]!)));
 }
 
 function ichimokuTk(b: Candle[]): State[] {
@@ -171,10 +167,6 @@ function superSmoother(b: Candle[], n = 20): (number | undefined)[] {
     return f;
 }
 
-function gated(dir: State[], open: (boolean | undefined)[]): State[] {
-    return dir.map((d, i) => (d === null || open[i] === undefined ? null : open[i] ? d : 0));
-}
-
 /** 量能 K 棒：累積到前 20 個日盤交易日平均每根 5m 成交量才收棒；時段結束強制收棒 */
 function volumeBars(m1: Candle[], b5: Candle[]): Candle[] {
     const key1 = m1.map((x) => tradingSessionOf('FUT', x.time).key);
@@ -189,7 +181,7 @@ function volumeBars(m1: Candle[], b5: Candle[]): Candle[] {
         sessions[idx.get(k)!]!.vol += m1[i]!.volume;
     }
     for (const x of b5) {
-        const s = idx.get(tradingSessionOf('FUT', x.time).key);
+        const s = idx.get(session5(x.time).key);
         if (s !== undefined) sessions[s]!.n5++;
     }
     const target = sessions.map((_, s) => {
@@ -230,7 +222,7 @@ function project(src: Candle[], dir: State[], b5: Candle[]): State[] {
 }
 
 function sessionSplit(b5: Candle[], m: number): State[] {
-    const night = b5.map((x) => tradingSessionOf('FUT', x.time).key.endsWith('N'));
+    const night = b5.map((x) => session5(x.time).night);
     const out: State[] = new Array(b5.length).fill(null);
     for (const isNight of [false, true]) {
         const ids = b5.flatMap((_, i) => (night[i] === isNight ? [i] : []));
@@ -261,14 +253,22 @@ test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯�
         const r = supertrend(r1b5, 10, m);
         const dir = r1b5.map((_, i) => (r.up[i]!.value !== undefined ? 1 : r.down[i]!.value !== undefined ? -1 : 0));
         const got = r1Metrics(r1b5, r1Events(dir), r1a14, r1days);
-        const fmt = [got[0]!.toFixed(2), got[1]!.toFixed(1), got[2]!.toFixed(1), String(got[3]), String(got[4]), got[5]!.toFixed(2), got[6]!.toFixed(2), got[7]!.toFixed(1)];
-        log.push(`重現 SuperTrend(10,${m})：${fmt.join(' | ')}`);
-        expect(fmt).toEqual(expected[m]);
+        const row = [got[0]!.toFixed(2), got[1]!.toFixed(1), got[2]!.toFixed(1), String(got[3]), String(got[4]), got[5]!.toFixed(2), got[6]!.toFixed(2), got[7]!.toFixed(1)];
+        log.push(`重現 SuperTrend(10,${m})：${row.join(' | ')}`);
+        expect(row).toEqual(expected[m]);
+        // 重現性檢查 3：判定用的 props() 在兩態演算法上與結果 1 的定義相同（訊號數、失效%、段長、延遲）；
+        // 唯一差別是 props() 不把資料尾端看不到 6 根結果的訊號放進失效率分母，所以換回同一個分母再比
+        const S: State[] = dir.map((d, i) => (i < 199 ? null : (d as State)));
+        const mine = props(S, r1b5, -Infinity, Infinity, r1days);
+        const asR1 = (x: number) => (x * mine.observed) / mine.n;
+        expect([mine.perDay, asR1(mine.fail3), asR1(mine.fail6), mine.seg, mine.lag].map((x) => x.toFixed(6)))
+            .toEqual([got[0]!, got[1]!, got[2]!, got[3]!, got[4]!].map((x) => x.toFixed(6)));
+        log.push(`重現 props()：SuperTrend(10,${m}) 與結果 1 定義相同（尾端右設限 ${mine.n - mine.observed} 個訊號不計入失效率）`);
     }
 
     // 資料：兩年 CSV（2026-08-25 之前）接新資料；重疊段逐欄相同
-    const { m1, b5, a14, overlap, dayN } = loadSpliced(CSV, FRESH_CSV);
-    log.push(`資料：1m ${m1.length} 根（${new Date(m1[0]!.time * 1000).toISOString()} 起），重疊段 ${overlap} 根逐欄相同；5m ${b5.length} 根`);
+    const { m1, b5, a14, overlap, freshOnly, dayN } = loadSpliced(CSV, FRESH_CSV);
+    log.push(`資料：1m ${m1.length} 根（${new Date(m1[0]!.time * 1000).toISOString()} 起），重疊段舊 CSV 的 ${overlap} 根逐欄相同，新資料另有 ${freshOnly} 根舊 CSV 沒有；5m ${b5.length} 根`);
 
     // 重現性檢查 2：產品 KAMA 的線＋腳本遲滯 = 產品 KAMA 方向
     const kp = { ...configFromParams({}).trend, algo: 'kama' } as TrendParams;
@@ -284,7 +284,7 @@ test('結果 9 第一階段：趨勢演算法候選的指標性質（TMF，唯�
     const chop = choppiness(b5);
     const er = efficiency(b5);
     const vb = volumeBars(m1, b5);
-    const vbDir = (m: number) => project(vb, stDir(vb, 10, m).map((d, i) => (i < WARMUP ? null : d)), b5);
+    const vbDir = (m: number) => project(vb, withWarmup(stDir(vb, 10, m)), b5);
     const gates = {
         adx: adx.map((x) => (x === undefined ? undefined : x >= 20)),
         chop: chop.map((x) => (x === undefined ? undefined : x < 61.8)),

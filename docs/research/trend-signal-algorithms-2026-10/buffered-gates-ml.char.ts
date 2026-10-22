@@ -6,14 +6,13 @@
 //   npx vitest run --config "$PWD/$D/vitest.config.mjs" --root "$D" buffered-gates-ml
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { tradingSessionOf } from '../../../src/lib/trend-signal/core/session';
 import { ALGORITHMS, kamaLine } from '../../../src/lib/trend-signal/trend/algorithms';
 import { configFromParams } from '../../../src/lib/trend-signal/config';
 import type { TrendParams } from '../../../src/lib/trend-signal/types';
 import type { Candle } from '../../../src/lib/types/market';
 import {
-    PERIOD_LIST, PERIODS, check, choppiness, closes, dmi, efficiency, emaArr, envelopes, fmt, loadSpliced, productDir,
-    propsByPeriod, referenceSet, rolling, type Period, type State,
+    PERIOD_LIST, PERIODS, check, choppiness, closeMeanSd, closes, dmi, efficiency, emaArr, envelopes, fmt, gated, loadSpliced, productDir,
+    propsByPeriod, referenceSet, session5, type Period, type State,
 } from './trend-lib';
 
 const CSV = process.env.TSP_CHAR_CSV ?? '';
@@ -33,10 +32,6 @@ function schmitt(xs: (number | undefined)[], openIf: (x: number) => boolean, clo
         else if (!st && openIf(x)) st = true;
         return st;
     });
-}
-
-function neutralGate(base: State[], gate: (boolean | undefined)[]): State[] {
-    return base.map((d, i) => (d === null || gate[i] === undefined ? null : gate[i] ? d : 0));
 }
 
 /** 打開時跟核心方向；關閉時維持上一個輸出、不接受翻轉；沒有 NEUTRAL */
@@ -68,16 +63,12 @@ function features(b5: Candle[], a14: (number | undefined)[]): (number[] | null)[
     const er = efficiency(b5);
     const { pdi, mdi, adx } = dmi(b5);
     const chop = choppiness(b5);
-    const mean = rolling(b5, 20, (w) => w.reduce((s, x) => s + x.close, 0) / w.length);
-    const sd = rolling(b5, 20, (w) => {
-        const m = w.reduce((s, x) => s + x.close, 0) / w.length;
-        return Math.sqrt(w.reduce((s, x) => s + (x.close - m) ** 2, 0) / w.length);
-    });
+    const { mean, sd } = closeMeanSd(b5);
     const atrEma = emaArr(a14, 100);
     return b5.map((x, i) => {
         const av = a14[i];
         if (i < 150 || av === undefined || av <= 0) return null;
-        const ses = tradingSessionOf('FUT', x.time);
+        const ses = session5(x.time);
         let vol = 0;
         for (let j = i - 20; j < i; j++) vol += b5[j]!.volume;
         const vals = [
@@ -201,8 +192,13 @@ function fitBoosting(X: number[][], y: number[]) {
         return { G, H, best };
     }
     function grow(rows: number[], depth: number, g: Float64Array, h: Float64Array): Node {
+        if (depth === 0) {
+            let G = 0, H = 0;
+            for (const r of rows) { G += g[r]!; H += h[r]!; }
+            return { leaf: H > 0 ? (0.1 * G) / H : 0 };
+        }
         const { G, H, best } = bestSplit(rows, g, h);
-        if (depth === 0 || !best || best.gain <= 0) return { leaf: H > 0 ? (0.1 * G) / H : 0 };
+        if (!best || best.gain <= 0) return { leaf: H > 0 ? (0.1 * G) / H : 0 };
         const L: number[] = [], R: number[] = [];
         const bk = B[best.k]!;
         for (const r of rows) (bk[r]! <= best.bin ? L : R).push(r);
@@ -324,7 +320,7 @@ test('結果 10：加緩衝的趨勢強度判斷與機器學習（TMF，唯讀�
     const cands: [string, State[], Period[]][] = [];
     for (const [bn, base] of bases) {
         for (const [gn, gate] of gateDefs) {
-            cands.push([`${bn}＋${gn}（轉 NEUTRAL）`, neutralGate(base, gate), PERIOD_LIST]);
+            cands.push([`${bn}＋${gn}（轉 NEUTRAL）`, gated(base, gate), PERIOD_LIST]);
             cands.push([`${bn}＋${gn}（維持）`, holdGate(base, gate), PERIOD_LIST]);
         }
     }
@@ -349,6 +345,20 @@ test('結果 10：加緩衝的趨勢強度判斷與機器學習（TMF，唯讀�
 
     // 方向模型的分類表現（描述用）：各段 12 根後漲跌的命中率與對數損失
     const clsRows: string[] = [];
+    const isRate = dr.ys.reduce((s, v) => s + v, 0) / dr.ys.length;
+    const baseRows: string[] = [];
+    for (const q of PERIOD_LIST) {
+        let n = 0, up = 0, ll = 0;
+        for (let i = 0; i + 12 < b5.length; i++) {
+            const t = b5[i]!.time;
+            if (t < PERIODS[q][0] || t > PERIODS[q][1] || b5[i + 12]!.time > PERIODS[q][1] || !X[i]) continue;
+            const y = b5[i + 12]!.close > b5[i]!.close ? 1 : 0;
+            n++;
+            up += y;
+            ll -= y * Math.log(isRate) + (1 - y) * Math.log(1 - isRate);
+        }
+        baseRows.push(`| ${q} | ${n} | ${fmt((100 * up) / n)} | ${fmt((100 * up) / n)} | ${fmt(ll / n, 4)} |`);
+    }
     for (const [name, m] of [['邏輯迴歸', lrD], ['梯度提升', gbD]] as const) {
         for (const q of PERIOD_LIST) {
             let n = 0, hit = 0, ll = 0;
@@ -391,7 +401,10 @@ test('結果 10：加緩衝的趨勢強度判斷與機器學習（TMF，唯讀�
         md += `| ${r.name} | ${r.checks.map((c) => (!c.used ? '不判' : c.ok ? '成立' : c.why || '不成立')).join(' | ')} | ${r.pass ? '**通過**' : '不通過'} |\n`;
     }
     md += '\n## 方向模型的分類表現（描述）\n\n| 模型 | 期間 | 列數 | 命中率% | 對數損失 |\n|---|---|---|---|---|\n' + clsRows.join('\n') + '\n';
-    md += `\n（全猜一邊的對數損失為 ${fmt(Math.log(2), 4)}）\n\n## 邏輯迴歸係數（標準化後）\n\n| 特徵 | 濾網 | 方向 |\n|---|---|---|\n`;
+    md += `\n比較基準（同一批列）：IS 上漲比例 ${fmt(100 * isRate)}%，所以「全猜上漲」的命中率等於各段的上漲比例；`;
+    md += `「固定預測 IS 上漲比例」的對數損失如下（固定猜 0.5 的對數損失是 ln 2 = ${fmt(Math.log(2), 4)}）。\n\n`;
+    md += '| 期間 | 列數 | 上漲比例% | 全猜上漲命中率% | 固定預測 IS 比例的對數損失 |\n|---|---|---|---|---|\n' + baseRows.join('\n') + '\n';
+    md += '\n## 邏輯迴歸係數（標準化後）\n\n| 特徵 | 濾網 | 方向 |\n|---|---|---|\n';
     FEATURES.forEach((name, k) => { md += `| ${name} | ${fmt(lrF.weights[k], 3)} | ${fmt(lrD.weights[k], 3)} |\n`; });
     md += `| 截距 | ${fmt(lrF.weights[FEATURES.length], 3)} | ${fmt(lrD.weights[FEATURES.length], 3)} |\n`;
     md += `\n## 梯度提升用到的特徵（分裂次數）\n\n濾網：${[...gbF.used].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join('、')}\n\n`;
