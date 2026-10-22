@@ -1,4 +1,4 @@
-// Trend Signal Pro tsp-app-1.4.0 — Web/App 共用計算函式，官方 App 自訂指標
+// Trend Signal Pro tsp-app-1.5.0 — Web/App 共用計算函式，官方 App 自訂指標
 // 由 npm run build:tsp-custom 產生；請修改 src/lib/trend-signal 的共用來源。
 // 5m 是主趨勢並判斷進出場，1m 是精準進出場；App 只給主圖本身的 K 棒，所以依主圖週期：
 //   1m 主圖：原模型（由 1m 聚合 5m 主趨勢、1m 精準提示、虛擬風控），與 Web 逐根相同。

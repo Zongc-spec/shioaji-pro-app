@@ -15,7 +15,7 @@ import { tradingSessionOf } from './core/session';
 import { runTrendSignal } from './engine';
 import type { TrendSignalResult } from './types';
 
-export const APP_TSP_VERSION = 'tsp-app-1.4.0';
+export const APP_TSP_VERSION = 'tsp-app-1.5.0';
 export type AppTspMode = 'model' | 'm5' | 'aux';
 export const APP_TSP_PLOTS = CUSTOM_TSP_PLOTS;
 
