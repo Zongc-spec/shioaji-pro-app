@@ -85,7 +85,7 @@ import {
 } from './indicator-dialog';
 // side-effect import順序：custom-indicators 在 module 載入時就把已存的
 // 自訂指標註冊進 DEF_BY_TYPE，loadInstances() 的型別過濾才不會把它們丟掉
-import { subscribeCustoms } from '../lib/custom-indicators';
+import { CUSTOM_PREFIX, subscribeCustoms } from '../lib/custom-indicators';
 import type { IndicatorPoint } from '../lib/indicators';
 import { ChartTradeMarkers, type ChartTradeMarker } from '../lib/chart-trade-markers';
 import { setHoverPickedPrice, setPickedPrice } from '../lib/price-sync';
@@ -1318,7 +1318,7 @@ export function CandleChart({
                         {
                             color,
                             lineWidth: st.width,
-                            title: o.kind === 'dashed' ? o.label : '',
+                            title: o.kind === 'dashed' && inst.type.startsWith(CUSTOM_PREFIX) ? o.label : '',
                             lineStyle:
                                 o.kind === 'dashed'
                                     ? LineStyle.Dashed

@@ -19,6 +19,16 @@ describe('三角形交易標記', () => {
         expect(points.every((p) => p.labelX >= p.labelWidth / 2)).toBe(true);
     });
 
+    it('Buy 與 Sell 互相避讓；堆疊有上限，不會一路推出圖外', () => {
+        const buy = { ...marker('Buy'), time: 60, low: 318, price: 318 }; // y = 182 + 18 = 200，佔 [200, 228]
+        const sell = { ...marker('Sell'), time: 61, high: 242, price: 242 }; // y = 258 − 18 = 240，佔 [212, 240]
+        const points = layoutTradeMarkers([buy, sell], (t) => t, (p) => 500 - p, 800, () => 24);
+        expect(points.map((p) => p.y)).toEqual([200, 172]);
+        const many = Array.from({ length: 12 }, () => marker('Sell', 'Sell 3R 出場'));
+        const ys = layoutTradeMarkers(many, (t) => t, (p) => 500 - p, 800, () => 90).map((p) => p.y);
+        expect(Math.min(...ys)).toBe(372 - 6 * 34);
+    });
+
     it('不繪製沒有座標或遠離視窗的事件', () => {
         expect(layoutTradeMarkers([marker('Buy')], () => null, () => 100, 800, () => 20)).toEqual([]);
         expect(layoutTradeMarkers([marker('Buy')], () => 2000, () => 100, 800, () => 20)).toEqual([]);

@@ -18,7 +18,13 @@ interface PositionedMarker extends ChartTradeMarker {
     labelWidth: number;
 }
 
-/** Keep simultaneous entries/exits in separate rows, including nearby labels. */
+// A triangle plus its label spans 28 px away from the candle: Buy downward, Sell upward.
+const SPAN = 28;
+const ROW = 34;
+const MAX_LEVELS = 6;
+const span = (side: IndicatorMarker['side'], y: number): [number, number] => (side === 'Buy' ? [y, y + SPAN] : [y - SPAN, y]);
+
+/** Keep simultaneous entries/exits in separate rows, including nearby labels of either side. */
 export function layoutTradeMarkers(markers: ChartTradeMarker[], xOf: (time: number) => number | null,
     yOf: (price: number) => number | null, width: number, measure: (text: string) => number): PositionedMarker[] {
     const placed: PositionedMarker[] = [];
@@ -31,10 +37,17 @@ export function layoutTradeMarkers(markers: ChartTradeMarker[], xOf: (time: numb
         const labelX = Math.max(labelWidth / 2 + 2, Math.min(width - labelWidth / 2 - 2, x));
         let y = anchor + (buy ? 18 : -18);
         const direction = buy ? 1 : -1;
-        // Labels and triangles occupy 32 px vertically. The entire event moves
-        // as one unit; the timestamp and execution price stay unchanged.
-        while (placed.some((p) => Math.abs(p.labelX - labelX) < (p.labelWidth + labelWidth) / 2 + 4
-            && Math.abs(p.y - y) < 32)) y += direction * 34;
+        const hits = (yy: number) => {
+            const [top, bottom] = span(marker.side, yy);
+            return placed.some((p) => {
+                if (Math.abs(p.labelX - labelX) >= (p.labelWidth + labelWidth) / 2 + 4) return false;
+                const [pt, pb] = span(p.side, p.y);
+                return top < pb + 4 && pt < bottom + 4;
+            });
+        };
+        // The entire event moves as one unit; the timestamp and execution price stay unchanged.
+        // Capped so a zoomed-out chart cannot stack labels far off the pane.
+        for (let level = 0; level < MAX_LEVELS && hits(y); level++) y += direction * ROW;
         placed.push({ ...marker, x, y, labelX, labelWidth });
     }
     return placed;
@@ -43,6 +56,9 @@ export function layoutTradeMarkers(markers: ChartTradeMarker[], xOf: (time: numb
 export class ChartTradeMarkers implements ISeriesPrimitive<Time> {
     private attachedTo: SeriesAttachedParameter<Time> | null = null;
     private readonly views: IPrimitivePaneView[] = [{ zOrder: () => 'top', renderer: () => ({ draw: this.draw }) }];
+
+    // Label widths depend only on the text and the fixed font; measure once per primitive.
+    private readonly widths = new Map<string, number>();
 
     constructor(private readonly markers: ChartTradeMarker[]) {}
 
@@ -65,7 +81,11 @@ export class ChartTradeMarkers implements ISeriesPrimitive<Time> {
             const layout = layoutTradeMarkers(this.markers,
                 (time) => attached.chart.timeScale().timeToCoordinate(time as UTCTimestamp),
                 (price) => attached.series.priceToCoordinate(price), mediaSize.width,
-                (text) => ctx.measureText(text).width);
+                (text) => {
+                    let w = this.widths.get(text);
+                    if (w === undefined) this.widths.set(text, (w = ctx.measureText(text).width));
+                    return w;
+                });
             for (const marker of layout) {
                 const { x, y } = marker;
                 const direction = marker.side === 'Buy' ? 1 : -1;

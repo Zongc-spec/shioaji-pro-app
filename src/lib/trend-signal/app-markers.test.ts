@@ -12,17 +12,21 @@ const toInput = (bars: Candle[]): BarsInput => ({
     time: bars.map((b) => b.time), open: bars.map((b) => b.open), high: bars.map((b) => b.high),
     low: bars.map((b) => b.low), close: bars.map((b) => b.close), volume: bars.map((b) => b.volume),
 });
-const exitKey = (reason: ExitReason) => reason === 'TP2R' ? '虛擬2R出場'
-    : reason === 'TP3R' ? '虛擬3R出場'
-        : reason === 'REVERSAL' || reason === 'TREND_INVALID' ? '虛擬反轉失效出場'
-            : '虛擬停損出場';
-const exitText = (side: 'Buy' | 'Sell', reason: ExitReason) => reason === 'TP2R' ? `${side} 2R 出場`
-    : reason === 'TP3R' ? `${side} 3R 出場`
-        : reason === 'REVERSAL' ? `${side} 反轉出場`
-        : reason === 'TREND_INVALID' ? `${side} 反轉失效出場`
-                : reason === 'BREAKEVEN_STOP' ? `${side} 保本停損出場`
-                    : reason === 'TRAIL_STOP' ? `${side} 移動停損出場`
-                        : `${side} 停損出場`;
+// 預期值逐字寫死，不沿用實作的對應：出場文字沿用部位方向（tsp-app-1.5.1），三角形依平倉動作
+const EXIT_KEY: Record<ExitReason, string> = {
+    STOP: '虛擬停損出場', BREAKEVEN_STOP: '虛擬停損出場', TRAIL_STOP: '虛擬停損出場',
+    TP2R: '虛擬2R出場', TP3R: '虛擬3R出場', REVERSAL: '虛擬反轉失效出場', TREND_INVALID: '虛擬反轉失效出場',
+};
+const EXIT_TEXT: Record<'LONG' | 'SHORT', Record<ExitReason, string>> = {
+    LONG: {
+        STOP: 'Buy 停損出場', BREAKEVEN_STOP: 'Buy 保本停損出場', TRAIL_STOP: 'Buy 移動停損出場',
+        TP2R: 'Buy 2R 出場', TP3R: 'Buy 3R 出場', REVERSAL: 'Buy 反轉出場', TREND_INVALID: 'Buy 反轉失效出場',
+    },
+    SHORT: {
+        STOP: 'Sell 停損出場', BREAKEVEN_STOP: 'Sell 保本停損出場', TRAIL_STOP: 'Sell 移動停損出場',
+        TP2R: 'Sell 2R 出場', TP3R: 'Sell 3R 出場', REVERSAL: 'Sell 反轉出場', TREND_INVALID: 'Sell 反轉失效出場',
+    },
+};
 
 function compute(bars: Candle[], riskHistory = 0) {
     const now = bars.at(-1)!.time + 300;
@@ -54,10 +58,10 @@ describe('TSP App marker metadata', () => {
             expect(app.outputs[entryKey]![idx(trade.fillTime)]).toBe(trade.fillPrice);
             expect(marker(entryKey, trade.fillTime)).toEqual({ side: entrySide, text: `${entrySide} 進場` });
             for (const fill of trade.fills) {
-                const key = exitKey(fill.reason);
+                const key = EXIT_KEY[fill.reason];
                 const at = idx(fill.time);
                 expect(app.outputs[key]![at]).not.toBeNull();
-                expect(marker(key, fill.time)).toEqual({ side: exitSide, text: exitText(entrySide, fill.reason) });
+                expect(marker(key, fill.time)).toEqual({ side: exitSide, text: EXIT_TEXT[trade.direction][fill.reason] });
             }
         }
         for (const [key, values] of Object.entries(app.outputs)) {

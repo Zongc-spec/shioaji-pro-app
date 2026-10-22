@@ -41,7 +41,7 @@ const HELP = [
     ['內建序列', 'open high low close volume time hl2 hlc3 ohlc4（陣列，與 K 棒逐根對齊）'],
     ['參數', 'p.參數名 — 在上方「參數」表定義，加入後可在指標設定裡調'],
     ['輸出', "plot('名稱', 序列, { kind:'line|dashed|histogram|points', color:'#rrggbb', signed:true, width:2 })"],
-    ['交易標記', "plot('進場', 價格序列, { kind:'points', markers:[null, {side:'Buy', text:'Buy 進場'}, ...] }) — Buy 上三角／Sell 下三角，逐根對齊"],
+    ['交易標記', "plot('進場', 價格序列, { kind:'points', markers:[null, {side:'Buy', text:'Buy 進場'}, ...] }) — Buy 上三角／Sell 下三角，逐根對齊；帶 markers 的輸出只畫有標記的點"],
     ['階梯虛線', "plot('目前停損', 價格序列, { kind:'dashed', plot:'step' })"],
     ['水平線', 'hline(數值) — 副圖的參考水平線（如 RSI 的 30/70）'],
     ['均線', 'ta.sma(src,n)  ta.ema(src,n)  ta.wma(src,n)  ta.rma(src,n)'],
@@ -132,7 +132,7 @@ export function CustomIndicatorEditor({
                     key,
                     label: kept?.label ?? key,
                     kind: kept?.kind ?? hint.kind ?? 'line',
-                    ...((kept?.plot ?? hint.plot) ? { plot: kept?.plot ?? hint.plot } : {}),
+                    ...(hint.plot ? { plot: hint.plot } : {}),
                     color:
                         kept?.color ??
                         (hint.color && /^#[0-9a-fA-F]{6}$/.test(hint.color)
@@ -175,7 +175,7 @@ export function CustomIndicatorEditor({
                     key,
                     label: kept?.label ?? key,
                     kind: kept?.kind ?? hint.kind ?? 'line',
-                    ...((kept?.plot ?? hint.plot) ? { plot: kept?.plot ?? hint.plot } : {}),
+                    ...(hint.plot ? { plot: hint.plot } : {}),
                     color:
                         kept?.color ??
                         (hint.color && /^#[0-9a-fA-F]{6}$/.test(hint.color)

@@ -103,8 +103,9 @@ export function runCustom(
         }
         const markers = Array.isArray(markerHints)
             ? markerHints.map((marker, i) => {
-                  if (marker === null || marker === undefined) return null;
-                  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) {
+                  // 與數值序列一樣容忍 falsy（`cond && {...}`）：當作沒有標記
+                  if (!marker) return null;
+                  if (typeof marker !== 'object' || Array.isArray(marker)) {
                       throw new Error(`plot('${name}') markers[${i}] 格式無效`);
                   }
                   const item = marker as { side?: unknown; text?: unknown };
@@ -128,11 +129,15 @@ export function runCustom(
                 ...(opts.kind === 'line' || opts.kind === 'dashed' || opts.kind === 'histogram' || opts.kind === 'points'
                     ? { kind: opts.kind }
                     : {}),
-                ...(opts.signed === true ? { signed: true } : {}),
-                ...(opts.width === 1 || opts.width === 2 ? { width: opts.width } : {}),
+                ...(opts.signed ? { signed: true } : {}),
+                ...(opts.width ? { width: opts.width } : {}),
                 ...(opts.plot === 'step' ? { plot: opts.plot } : {}),
                 ...(markers ? { markers } : {}),
             };
+        } else if (hints[name]?.markers) {
+            // 同名輸出重畫但沒帶 opts：舊 markers 是對齊上一個序列的，不能套到新序列
+            const { markers: _stale, ...rest } = hints[name]!;
+            hints[name] = rest;
         }
     };
 

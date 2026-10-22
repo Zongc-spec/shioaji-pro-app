@@ -97,6 +97,15 @@ it('真自訂執行器的 marker 接到圖表、風控為階梯虛線；切週�
     expect(calls.order).not.toHaveBeenCalled();
 });
 
+it('只有自訂指標的虛線在價格軸帶名稱，內建指標的虛線不帶', async () => {
+    localStorage.setItem('sj-pro-indicators-v2', JSON.stringify([newInstance(customType(id)), newInstance('donchian')]));
+    mount();
+    await flush();
+    expect(created.filter((s) => s.kind === 'Line' && s.options.lineStyle === 2).length).toBeGreaterThan(1);
+    expect(created.some((s) => s.kind === 'Line' && s.options.title === 'stop')).toBe(true);
+    expect(created.some((s) => s.kind === 'Line' && s.options.title === '中軌')).toBe(false);
+});
+
 it('隱藏指標或單獨關閉交易輸出時，不留下交易標記', async () => {
     const instance = newInstance(customType(id));
     localStorage.setItem('sj-pro-indicators-v2', JSON.stringify([{ ...instance, hidden: true }]));

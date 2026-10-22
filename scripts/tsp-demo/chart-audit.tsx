@@ -74,7 +74,8 @@ export function ChartAudit({ timeframe, minutes, params, source }: Props) {
                 const expected = direct.hints[key];
                 const actual = runtime.hints[key];
                 return !!expected && !!actual && expected.kind === actual.kind &&
-                    expected.color === actual.color && expected.width === actual.width;
+                    expected.color === actual.color && expected.width === actual.width && expected.plot === actual.plot &&
+                    JSON.stringify(expected.markers ?? null) === JSON.stringify(actual.markers ?? null);
             });
             const lastBar = chart.at(-1) ?? null;
             const trades = direct.result?.trades ?? [];

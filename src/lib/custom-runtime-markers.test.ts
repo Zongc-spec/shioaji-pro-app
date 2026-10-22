@@ -38,6 +38,19 @@ describe('custom runtime marker hints', () => {
         expect(empty.hints.empty?.markers).toEqual([null, null, null]);
     });
 
+    it('treats falsy marker entries as no marker, keeps legacy width/signed, and drops stale markers on a bare re-plot', () => {
+        const falsy = runCustom("plot('x', close, { markers: [false, 0, { side: 'Buy', text: 'b' }] })", bars, {});
+        expect(falsy.error).toBeUndefined();
+        expect(falsy.hints.x?.markers).toEqual([null, null, { side: 'Buy', text: 'b' }]);
+
+        const legacy = runCustom("plot('h', close, { kind: 'histogram', width: 3, signed: 1 })", bars, {});
+        expect(legacy.hints.h).toEqual({ kind: 'histogram', width: 3, signed: true });
+
+        const replot = runCustom("plot('x', close, { markers: [{ side: 'Buy', text: 'a' }, null, null] }); plot('x', [null, 11, 12]);", bars, {});
+        expect(replot.outputs.x).toEqual([null, 11, 12]);
+        expect(replot.hints.x?.markers).toBeUndefined();
+    });
+
     it('moves runtime marker metadata onto computed IndicatorPoints without storing sample arrays', () => {
         const id = 'marker-runtime-test';
         const outputs = [{ key: 'signal', label: 'signal', kind: 'points' as const, color: '#123456' }];
