@@ -64,6 +64,9 @@ beforeEach(async () => {
     m.nativeFetch.mockImplementation(async () => new Response('{}'));
 });
 afterEach(() => vi.unstubAllGlobals());
+// 觸價引擎沒有 stop：「restored protection trigger」測試啟動的引擎在觸發後要等 OCO 計時器（3–10 秒）才放掉 Tick，
+// 那時送出的 /api/v1/stream/unsubscribe 會經過當下測試的 plugin-http mock。排在它之後的測試只算送到自己路徑的請求。
+const sentTo = (path: string) => m.nativeFetch.mock.calls.filter(c => c[0] === path);
 
 it.each(['production', 'unknown', 'roundtrip', 'removed', 'unsigned'] as const)(
     'rejects a trade subscription after %s during native module loading', async change => {
@@ -72,7 +75,7 @@ it.each(['production', 'unknown', 'roundtrip', 'removed', 'unsigned'] as const)(
         if (change === 'unsigned') { m.accounts[0]!.signed = true; mode(false); }
         const pending = shioaji.subscribeTradeEvents(captured);
         const rejected = expect(pending).rejects.toThrow(/已變更|不可用/);
-        await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
         if (change === 'removed') m.accounts = [];
         else if (change === 'unsigned') m.accounts[0]!.signed = false;
         else {
@@ -94,7 +97,7 @@ it('keeps the boot health → subscription path guarded during native module loa
     const { subscribeTradeReports } = await import('./boot');
     const pending = subscribeTradeReports();
     const rejected = expect(pending).rejects.toThrow('已變更');
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     expect(health).toHaveBeenCalledOnce();
     mode(false);
     release();
@@ -106,7 +109,7 @@ it.each([true, false, undefined])('sends eligible trade subscriptions in mode %s
     mode(simulation);
     m.accounts[0]!.signed = simulation !== true;
     const pending = shioaji.subscribeTradeEvents(m.accounts[0]!);
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     release();
     await pending;
     expect(m.nativeFetch).toHaveBeenCalledOnce();
@@ -125,7 +128,7 @@ it('rechecks the mode at native dispatch for account-scoped trade subscriptions'
     const path = '/api/v1/auth/subscribe_trade';
     const pending = api.apiPost(path, {});
     const rejected = expect(pending).rejects.toThrow('已變更');
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     mode(false);
     mode(true); // Same final mode, different generation.
     release();
@@ -143,7 +146,7 @@ it('rechecks the mode after browser serialization for account-scoped trade subsc
 
 it.each(paths.slice(1))('sends account-independent %s even if the mode changes during native loading', async path => {
     const pending = api.apiPost(path, {});
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     mode(false);
     mode(true);
     release();
@@ -179,7 +182,7 @@ it.each([true, false])('keeps a restored protection trigger Tick subscribed as u
     mode(undefined);
     const engine = await import('./trigger-engine');
     engine.startTriggerEngine();
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     mode(simulation); // syncQuotes sees an existing hold while native import waits
     release();
     await vi.waitFor(() => expect(m.register).toHaveBeenCalledOnce());
@@ -197,18 +200,18 @@ it.each(['Tick', 'BidAsk', 'Quote'] as const)('subscribes and registers %s after
     const contract = { code: '2330', security_type: 'STK' as const, exchange: 'TSE' as const, target_code: null };
     m.nativeFetch.mockImplementation(async () => new Response('{"success":true}'));
     const pending = shioaji.subscribeQuote(contract, quoteType);
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     mode(true);
     release();
     await expect(pending).resolves.toEqual({ success: true });
-    expect(m.nativeFetch).toHaveBeenCalledOnce();
+    expect(sentTo('/api/v1/stream/subscribe')).toHaveLength(1);
     expect(m.register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: contract.code, quote_type: quoteType }));
 });
 
 it.each(paths)('sends a subscription request when the mode stays current for %s', async path => {
     const pending = api.apiPost(path, {});
-    await vi.waitFor(() => expect(m.loading).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(m.loading).toHaveBeenCalled());
     release();
     await pending;
-    expect(m.nativeFetch).toHaveBeenCalledOnce();
+    expect(sentTo(path)).toHaveLength(1);
 });

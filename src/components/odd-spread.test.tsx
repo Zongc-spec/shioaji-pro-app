@@ -43,6 +43,9 @@ vi.mock('../lib/odd-spread-service', () => ({
 
 import { OddSpreadView, type OddSpreadViewProps } from './odd-spread';
 
+// boot.ts 的背景委託回報訂閱失敗時會另發「委託回報訂閱失敗」；它可能晚於本元件的通知才到，所以「最後一則」不算它
+const lastNotice = () => mocks.notify.mock.calls.map(c => c[0]).filter(n => n.title !== '委託回報訂閱失敗').at(-1)!;
+
 const account: Account = { account_type: 'S', broker_id: 'BR', account_id: 'A', signed: true, person_id: '', username: '' };
 const otherAccount: Account = { ...account, account_id: 'B' };
 const contract = { code: '2330', name: '台積電', security_type: 'STK', reference: 1080, limit_up: 1185, limit_down: 975 } as unknown as ContractInfo;
@@ -243,7 +246,7 @@ it('虧損第二次確認後仍依設定跳委託確認，期間價差改變則�
     await rerender({ feed: { ...lossFeed, odd: { ...lossFeed.odd, bids: [{ price: 1075, vol: 5000 }] } } });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間價差、數量或費用已變動');
+    expect(lastNotice().body).toContain('確認期間價差、數量或費用已變動');
 });
 
 it('執行：把點擊當下的商品、帳戶與計畫交給主視窗服務', async () => {
@@ -274,7 +277,7 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ account: otherAccount });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間帳戶已變更');
+    expect(lastNotice().body).toContain('確認期間帳戶已變更');
 
     pending();
     await rerender({ account });
@@ -282,7 +285,7 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ contract: { ...contract, code: '2317' } as ContractInfo });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間商品已切換');
+    expect(lastNotice().body).toContain('確認期間商品已切換');
 
     pending();
     await rerender({ contract });
@@ -291,7 +294,7 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ feed: { ...feed, odd: { ...feed.odd, bids: [{ price: 1080, vol: 5000 }] } } });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間行情或庫存已變動');
+    expect(lastNotice().body).toContain('確認期間行情或庫存已變動');
 
     pending();
     await rerender({ feed });
@@ -299,7 +302,7 @@ it('委託確認期間帳戶、商品或行情變了 → 不送並說明', async
     await rerender({ inventoryShares: 500 });
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('庫存不足');
+    expect(lastNotice().body).toContain('庫存不足');
 
     // 都沒變 → 送出確認過的那一份
     pending();
@@ -323,7 +326,7 @@ it('點價下單：未啟用不送；1,000 股拆 999＋1，後一筆失敗時�
         ['Buy', 999, 'IntradayOdd'],
         ['Buy', 1, 'IntradayOdd'],
     ]);
-    const n = mocks.notify.mock.calls.at(-1)![0];
+    const n = lastNotice();
     expect(n.title).toBe('零股拆單只送出部分');
     expect(n.body).toContain('已送出 999 股');
     expect(n.body).toContain('零股 第 2/2 筆 1 股結果未確認（可能已送出）');
@@ -446,7 +449,7 @@ it('拆單第一筆就逾時（結果不明）：送出前加持久化鎖、失�
     expect(mocks.addLock.mock.calls[0]!.slice(0, 2)).toEqual(['2330', account]);
     expect(mocks.clearLock).not.toHaveBeenCalled();
     expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：零股 第 1/2 筆 999 股結果未確認（可能已送出）；第 2～2 筆未送');
-    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('點價委託結果未確認');
+    expect(lastNotice().title).toBe('點價委託結果未確認');
     expect(button('啟用點價')).toBeDefined();
 });
 
@@ -459,7 +462,7 @@ it('拆單只送出部分、其餘確定未送：同樣鎖定，說明哪幾筆�
     await act(async () => { cell.props.onClick(); });
     expect(mocks.clearLock).not.toHaveBeenCalled();
     expect(mocks.updateLock).toHaveBeenCalledWith('lk-1', '2330 買 @ 1,100：已送出 999 股；零股 第 2/2 筆 1 股未送出');
-    expect(mocks.notify.mock.calls.at(-1)![0].title).toBe('零股拆單只送出部分');
+    expect(lastNotice().title).toBe('零股拆單只送出部分');
 });
 
 it('有點價鎖時：顯示原因、不能啟用點價；核對後解除', async () => {
@@ -509,7 +512,7 @@ it('環境在按下時綁定：確認期間切換伺服器或模擬／正式 →
     mocks.envOk.value = false; // 確認視窗開著時切到正式
     await act(async () => { approve(true); });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間伺服器或模擬／正式環境已切換');
+    expect(lastNotice().body).toContain('確認期間伺服器或模擬／正式環境已切換');
 });
 
 it('模擬／正式未知時不開始', async () => {
@@ -543,7 +546,7 @@ it('補單確認：以確認當下的數量與價格送；缺口已變則不送�
     await render({ execs: [exec] });
     await act(async () => { button('以最新價補單').props.onClick(); });
     expect(mocks.accept).toHaveBeenCalledWith('os-1', { version: 3, leg: 'round', action: 'Buy', quantity: 1, orders: [{ price: 1100, quantity: 1 }] });
-    expect(mocks.notify.mock.calls.at(-1)![0].body).toContain('確認期間缺口或環境已變更');
+    expect(lastNotice().body).toContain('確認期間缺口或環境已變更');
     // 建議委託總量與缺口不符 → 不送
     mocks.refresh.mockReturnValue([{ price: 1100, quantity: 2 }]);
     mocks.accept.mockClear();
