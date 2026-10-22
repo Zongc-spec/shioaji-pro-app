@@ -2263,7 +2263,7 @@
 			case "TREND_INVALID": return `${side} 反轉失效出場`;
 		}
 	};
-	/** TSP App plot 樣式與 marker metadata；marker 只投影到既有且有值的輸出點。 */
+	/** TSP App plot 樣式與 marker metadata；marker 只給虛擬進出場（主趨勢 BUY/SELL 仍是圓點），且只投影到既有且有值的輸出點。 */
 	function appTspPlotHints(outputs, chartTimes, result, mode, riskHistory) {
 		const markers = Object.fromEntries(CUSTOM_TSP_PLOTS.map(([key]) => [key, new Array(chartTimes.length).fill(null)]));
 		const indexes = /* @__PURE__ */ new Map();
@@ -2274,26 +2274,17 @@
 				text: marker.text
 			};
 		};
-		if (result && mode !== "aux") {
-			for (const signal of result.signals) {
-				const side = signal.kind === "BUY" ? "Buy" : "Sell";
-				put(signal.kind, signal.barTime, {
-					side,
-					text: `${side} 趨勢`
-				});
-			}
-			for (const trade of result.trades) {
-				const side = trade.direction === "LONG" ? "Sell" : "Buy";
-				const entrySide = trade.direction === "LONG" ? "Buy" : "Sell";
-				put(trade.direction === "LONG" ? "虛擬進場多" : "虛擬進場空", trade.fillTime, {
-					side: entrySide,
-					text: `${entrySide} 進場`
-				});
-				for (const fill of trade.fills) put(exitPlot(fill.reason), fill.time, {
-					side,
-					text: exitText(side, fill.reason)
-				});
-			}
+		if (result && mode !== "aux") for (const trade of result.trades) {
+			const side = trade.direction === "LONG" ? "Sell" : "Buy";
+			const entrySide = trade.direction === "LONG" ? "Buy" : "Sell";
+			put(trade.direction === "LONG" ? "虛擬進場多" : "虛擬進場空", trade.fillTime, {
+				side: entrySide,
+				text: `${entrySide} 進場`
+			});
+			for (const fill of trade.fills) put(exitPlot(fill.reason), fill.time, {
+				side,
+				text: exitText(side, fill.reason)
+			});
 		}
 		return Object.fromEntries(CUSTOM_TSP_PLOTS.map(([key, color]) => [key, {
 			color,

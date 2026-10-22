@@ -33,7 +33,7 @@ describe('TSP App marker metadata', () => {
     it.each([
         ['1m', source],
         ['5m', chart5],
-    ] as const)('%s signals, entries, and all exits align to non-empty output slots', (tf, bars) => {
+    ] as const)('%s entries and all exits align to non-empty output slots; trend switches stay unmarked', (tf, bars) => {
         const app = compute(bars);
         const times = bars.map((b) => b.time);
         const idx = (time: number) => times.indexOf(time);
@@ -43,9 +43,8 @@ describe('TSP App marker metadata', () => {
         expect(res.signals.some((s) => s.kind === 'SELL')).toBe(true);
 
         for (const signal of res.signals) {
-            const side = signal.kind === 'BUY' ? 'Buy' : 'Sell';
             expect(app.outputs[signal.kind]![idx(signal.barTime)]).toBe(signal.close);
-            expect(marker(signal.kind, signal.barTime)).toEqual({ side, text: `${side} 趨勢` });
+            expect(marker(signal.kind, signal.barTime)).toBeNull();
         }
         expect(res.trades.length).toBeGreaterThan(0);
         for (const trade of res.trades) {

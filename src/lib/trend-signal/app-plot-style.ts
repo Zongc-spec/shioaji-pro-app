@@ -6,7 +6,6 @@ import { CUSTOM_TSP_PLOTS } from './custom-adapter';
 const LEVELS = new Set(['初始停損', '目前停損', '保本價', '1R', '2R', '3R']);
 
 type AppPlotResult = {
-    signals: readonly { kind: 'BUY' | 'SELL'; barTime: number }[];
     trades: readonly {
         direction: 'LONG' | 'SHORT';
         fillTime: number;
@@ -31,7 +30,7 @@ const exitText = (side: IndicatorMarker['side'], reason: ExitReason) => {
     }
 };
 
-/** TSP App plot 樣式與 marker metadata；marker 只投影到既有且有值的輸出點。 */
+/** TSP App plot 樣式與 marker metadata；marker 只給虛擬進出場（主趨勢 BUY/SELL 仍是圓點），且只投影到既有且有值的輸出點。 */
 export function appTspPlotHints(
     outputs: Record<string, (number | null)[]>,
     chartTimes: number[],
@@ -51,10 +50,6 @@ export function appTspPlotHints(
     };
 
     if (result && mode !== 'aux') {
-        for (const signal of result.signals) {
-            const side = signal.kind === 'BUY' ? 'Buy' : 'Sell';
-            put(signal.kind, signal.barTime, { side, text: `${side} 趨勢` });
-        }
         for (const trade of result.trades) {
             const side = trade.direction === 'LONG' ? 'Sell' : 'Buy';
             const entrySide = trade.direction === 'LONG' ? 'Buy' : 'Sell';

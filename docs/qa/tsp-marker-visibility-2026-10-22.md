@@ -5,7 +5,7 @@
 
 ## 可檢查成果
 
-- 自訂 `plot` 增加逐根對齊的 Buy/Sell metadata。三角形繪在 K 棒上／下方及圖表頂層，同棒及附近事件分列；文字區分趨勢、進場與各種虛擬出場原因。多單出場 Sell、空單回補 Buy。
+- 自訂 `plot` 增加逐根對齊的 Buy/Sell metadata。三角形繪在 K 棒上／下方及圖表頂層，同棒及附近事件分列；文字區分進場與各種虛擬出場原因。多單出場 Sell、空單回補 Buy。
 - 六項目前部位風控以虛線為預設，目前停損使用階梯虛線；價格軸標籤啟用時可顯示風控名稱。維持原本19個輸出名稱、數值、時間與交易計算。
 - 已產生 `docs/trend-signal-pro-custom.js`；與共用來源一致。舊版 `plot` 能忽略額外 metadata，三角形仍需包含新 renderer 的前端建置。
 - [1m 合成回放](../images/tsp-marker-visibility-1m.png)、[5m 合成回放](../images/tsp-marker-visibility-5m.png)。這是 Chrome 執行正式圖表元件搭配既有 demo stubs 的截圖，沒有使用帳戶或真實交易回報。
@@ -60,6 +60,8 @@ Codex 配額中斷後，把上述未提交內容以 `git apply --3way` 搬到乾
 `npm test`／`vitest run` 不是每次全綠：連跑多次，會隨機有 1 個與本次無關的測試失敗
 （`subscription-dispatch`、`odd-spread`、`candle-chart-order` 輪流出現，單獨執行皆通過）。
 未含本次變更的 `cec405d` 連跑 4 次也出現同樣的隨機失敗，所以是既有的時序不穩，不是 marker 變更造成；本次沒有修它。
+
+使用者實測指出 5m 主趨勢切換（BUY/SELL）也畫成「Buy／Sell 趨勢」三角形，與需求「進出場改三角形」不符；已改回圓點，三角形只用在虛擬進出場。
 
 預覽 `replayAt=2026-08-27T02:00:00` 的 1m 截圖核對：多方趨勢線為實線，目前停損為階梯虛線並隨移動停損上移，其餘風控為虛線。
 
