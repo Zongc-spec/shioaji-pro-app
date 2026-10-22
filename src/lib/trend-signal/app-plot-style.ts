@@ -55,7 +55,7 @@ export function appTspPlotHints(
             const entrySide = trade.direction === 'LONG' ? 'Buy' : 'Sell';
             put(trade.direction === 'LONG' ? '虛擬進場多' : '虛擬進場空', trade.fillTime,
                 { side: entrySide, text: `${entrySide} 進場` });
-            for (const fill of trade.fills) put(exitPlot(fill.reason), fill.time, { side, text: exitText(side, fill.reason) });
+            for (const fill of trade.fills) put(exitPlot(fill.reason), fill.time, { side, text: exitText(entrySide, fill.reason) });
         }
     }
 

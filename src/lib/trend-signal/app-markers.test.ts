@@ -57,7 +57,7 @@ describe('TSP App marker metadata', () => {
                 const key = exitKey(fill.reason);
                 const at = idx(fill.time);
                 expect(app.outputs[key]![at]).not.toBeNull();
-                expect(marker(key, fill.time)).toEqual({ side: exitSide, text: exitText(exitSide, fill.reason) });
+                expect(marker(key, fill.time)).toEqual({ side: exitSide, text: exitText(entrySide, fill.reason) });
             }
         }
         for (const [key, values] of Object.entries(app.outputs)) {
